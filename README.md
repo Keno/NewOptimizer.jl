@@ -1,7 +1,17 @@
-# Inference2
+# NotInferenceDontLookHere
 
-[![Build Status](https://travis-ci.org/Keno/Inference2.jl.svg?branch=master)](https://travis-ci.org/Keno/Inference2.jl)
+This is not inference. However, it does help you with developing inference
+by loading a separate copy of inference into this package and hooking up
+Revise. This allows you to easily test changes to inference in isolation.
 
-[![Coverage Status](https://coveralls.io/repos/Keno/Inference2.jl/badge.svg?branch=master&service=github)](https://coveralls.io/github/Keno/Inference2.jl?branch=master)
+# Usage
+```
+using NotInferenceDontLookHere
+# For convenience, can use a shorted name
+const NI = NotInferenceDontLookHere
 
-[![codecov.io](http://codecov.io/github/Keno/Inference2.jl/coverage.svg?branch=master)](http://codecov.io/github/Keno/Inference2.jl?branch=master)
+# Infer something
+f(x) = x
+mi = NI.code_for_method(first(methods(f)), Tuple{typeof(f), Int64}, Core.svec(), typemax(UInt))
+Inference2.typeinf_ext(method_instance, typemax(UInt))
+```
