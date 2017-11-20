@@ -13,5 +13,5 @@ const NI = NotInferenceDontLookHere
 # Infer something
 f(x) = x
 mi = NI.code_for_method(first(methods(f)), Tuple{typeof(f), Int64}, Core.svec(), typemax(UInt))
-NI.typeinf_ext(method_instance, typemax(UInt))
+NI.typeinf_ext(mi, typemax(UInt))
 ```
