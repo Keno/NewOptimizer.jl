@@ -7,11 +7,9 @@ Revise. This allows you to easily test changes to inference in isolation.
 # Usage
 ```julia
 using NotInferenceDontLookHere
-# For convenience, can use a shorted name
-const NI = NotInferenceDontLookHere
+# For convenience, `NI` is introduced as a short alias
 
 # Infer something
 f(x) = x
-mi = NI.code_for_method(first(methods(f)), Tuple{typeof(f), Int64}, Core.svec(), typemax(UInt))
-NI.typeinf_ext(mi, typemax(UInt))
+@NI.code_typed f(1)
 ```
