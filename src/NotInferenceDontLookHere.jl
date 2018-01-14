@@ -4,6 +4,7 @@ baremodule NotInferenceDontLookHere
 using Core.Intrinsics
 import Core: print, println, show, write, unsafe_write, STDOUT, STDERR
 
+const NI = NotInferenceDontLookHere
 export NI
 
 const Base = Core.Main.Base
