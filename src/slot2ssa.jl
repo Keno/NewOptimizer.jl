@@ -36,41 +36,28 @@ function scan_slot_def_use(nargs, ci)
     result
 end
 
-function renumber_ssa!(stmt, ssanums, new_ssa=false, used_ssa = Set{Int}())
-    if isa(stmt, SSAValue)
-        id = stmt.id + (new_ssa ? 0 : 1)
-        if id > length(ssanums)
-            return stmt
-        end
-        val = ssanums[id]
-        isa(val, SSAValue) && push!(used_ssa, val.id)
-        return val
-    end
-    if isexpr(stmt, :(=))
-        stmt.args[2] = renumber_ssa!(stmt.args[2], ssanums, new_ssa, used_ssa)
+function renumber_ssa(stmt::SSAValue, ssanums, new_ssa=false, used_ssa = nothing)
+    id = stmt.id + (new_ssa ? 0 : 1)
+    if id > length(ssanums)
         return stmt
     end
-    if isa(stmt, GotoIfNot)
-        return GotoIfNot{Any}(renumber_ssa!(stmt.cond, ssanums, new_ssa, used_ssa), stmt.dest)
-    elseif isa(stmt, ReturnNode)
-        return ReturnNode{Any}(renumber_ssa!(stmt.val, ssanums, new_ssa, used_ssa))
-    elseif isa(stmt, PhiNode)
-        values = Vector{Any}(uninitialized, length(stmt.values))
-        for i = 1:length(values)
-            isassigned(stmt.values, i) || continue
-            values[i] = renumber_ssa!(stmt.values[i], ssanums, new_ssa, used_ssa)
-        end
-        return PhiNode(stmt.edges, values)
-    elseif isa(stmt, PiNode)
-        return PiNode(renumber_ssa!(stmt.val, ssanums, new_ssa, used_ssa), stmt.typ)
+    val = ssanums[id]
+    if isa(val, SSAValue) && used_ssa !== nothing
+        used_ssa[val.id] += 1
     end
-    if isexpr(stmt, :call) || isexpr(stmt, :new)
-        for i = 1:length(stmt.args)
-            stmt.args[i] = renumber_ssa!(stmt.args[i], ssanums, new_ssa, used_ssa)
+    return val
+end
+
+function renumber_ssa!(stmt, ssanums, new_ssa=false, used_ssa = nothing)
+    isa(stmt, SSAValue) && return renumber_ssa(stmt, ssanums, new_ssa, used_ssa)
+    urs = userefs(stmt)
+    for op in urs
+        val = op[]
+        if isa(val, SSAValue)
+            op[] = renumber_ssa(val, ssanums, new_ssa, used_ssa)
         end
-        return stmt
     end
-    return stmt
+    return urs[]
 end
 
 function make_ssa!(ci, idx, slot, typ)
@@ -99,7 +86,6 @@ function construct_ssa!(ci, cfg, domtree, defuse)
     phi_ssas = SSAValue[]
     code = Any[nothing for _ = 1:length(ci.code)]
     ir = IRCode(code)
-    @show defuse
     for (idx, slot) in enumerate(defuse)
         # No uses => no need for phi nodes
         isempty(slot.uses) && continue
@@ -116,7 +102,6 @@ function construct_ssa!(ci, cfg, domtree, defuse)
         end
         # TODO: Perform liveness here to eliminate dead phi nodes
         phiblocks = idf(cfg, defuse_blocks, domtree, idx)
-        @show phiblocks
         for block in phiblocks
             push!(phi_slots[block], idx)
             node = PhiNode()
@@ -128,7 +113,7 @@ function construct_ssa!(ci, cfg, domtree, defuse)
     # Perform SSA renaming
     worklist = Any[(1, 0, Any[SSAValue(-1) for _ = 1:length(ci.slotnames)])]
     visited = Set{Int}()
-    while true
+    while !isempty(worklist)
         (item, pred, incoming_vals) = pop!(worklist)
         # Insert phi nodes if necessary
         for (idx, slot) in enumerate(phi_slots[item])
@@ -166,7 +151,6 @@ function construct_ssa!(ci, cfg, domtree, defuse)
         for succ in cfg.blocks[item].succs
             push!(worklist, (succ, item, copy(incoming_vals)))
         end
-        isempty(worklist) && break
     end
     # Delete any instruction in unreachable blocks
     for bb in setdiff(Set{Int}(1:length(cfg.blocks)), visited)
@@ -189,7 +173,6 @@ function construct_ssa!(ci, cfg, domtree, defuse)
     end
     # Renumber SSA values
     code = map(stmt->renumber_ssa!(stmt, ssavalmap), code)
-    @show ir.new_nodes
     new_nodes = map(((pt,typ,stmt),)->(pt, typ, renumber_ssa!(stmt, ssavalmap)), ir.new_nodes)
     IRCode(code, types, new_nodes)
 end

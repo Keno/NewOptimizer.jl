@@ -4,13 +4,10 @@ function getfield_elim_pass!(ir::IRCode)
     for (idx, stmt) in compact
         is_call(stmt, :getfield) || continue
         isa(stmt.args[2], SSAValue) || continue
-        @show stmt
-        @show typeof(stmt.args[3]
-        )
         field = stmt.args[3]
         isa(field, QuoteNode) && (field = field.value)
         isa(field, Union{Int, Symbol}) || continue
-        defidx = stmt.args[2].id
+        orig_defidx = defidx = stmt.args[2].id
         def = compact[defidx]
         typeconstraint = types(compact)[defidx]
         phi_locs = Tuple{Int, Int}[]
@@ -82,14 +79,11 @@ function type_lift_pass!(ir::IRCode)
         val, cmp = x
         cmptyp = typeof(cmp)
         def = ir.stmts[val.id]
-        @show def
         if isa(def, PhiNode)
             # See if this is only true on one branch
             branches = collect(Iterators.filter(zip(def.edges, def.values)) do (edge, value)
-                @show value_typ(ir, value)
                 cmptyp <: value_typ(ir, value)
             end)
-            @show branches
             length(branches) == 1 || continue
             value_typ(ir, branches[1][2]) == cmptyp || continue
             # Ok, merge the compare into the phi node

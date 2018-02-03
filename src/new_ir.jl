@@ -317,10 +317,14 @@ end
 function annotate_pred!(ir, cfg, domtree, root, val, replacement)
     for bb in dominated(domtree, root)
         for idx in cfg.blocks[bb].stmts
-            # This is overkill, but this is only a prototype
-            renumber = Any[SSAValue(n) for n = 1:length(ir.stmts)]
-            renumber[val.id] = replacement
-            ir.stmts[idx] = renumber_ssa!(ir.stmts[idx], renumber, true)
+            urs = userefs(ir.stmts[idx])
+            for ops in urs
+                use = ops[]
+                if isa(use, SSAValue) && (use.id == val.id)
+                    ops[] = replacement
+                end
+            end
+            ir.stmts[idx] = urs[]
         end
     end
 end
@@ -377,16 +381,15 @@ function run_passes(f, args)
     ci = NI.code_typed(f, args)[1].first
     ci.code = map(normalize, ci.code)
     cfg = compute_basic_blocks(ci.code)
-    defuse_insts = scan_slot_def_use(1, ci)
+    defuse_insts = scan_slot_def_use(length(args.parameters), ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, cfg, domtree, defuse_insts)
     ir = compact!(ir)
     ir = predicate_insertion_pass!(ir, compute_basic_blocks(ir.stmts), domtree)
-    ir = compact!(ir)
     ir = getfield_elim_pass!(ir)
-    @show ir
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
+    ir
 end
 
 # Test Case

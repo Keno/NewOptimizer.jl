@@ -9,24 +9,88 @@ struct OldSSAValue
     id::Int
 end
 
-function scan_ssa_use!(used, stmt)
-    isa(stmt, SSAValue) && push!(used, stmt.id)
+mutable struct UseRefIterator{T}
+    stmt::T
+end
+Base.getindex(it::UseRefIterator) = it.stmt
+
+struct UseRef
+    urs::UseRefIterator
+    use::Int
+end
+
+struct OOBToken
+end
+
+struct UndefToken
+end
+
+function Base.getindex(x::UseRef)
+    stmt = x.urs.stmt
     if isexpr(stmt, :call) || isexpr(stmt, :new)
-        foreach(arg->scan_ssa_use!(used, arg), stmt.args)
+        x.use > length(stmt.args) && return OOBToken()
+        stmt.args[x.use]
     elseif isa(stmt, GotoIfNot)
-        scan_ssa_use!(used, stmt.cond)
+        x.use == 1 || return OOBToken()
+        return stmt.cond
     elseif isa(stmt, ReturnNode) || isa(stmt, PiNode)
-        scan_ssa_use!(used, stmt.val)
+        x.use == 1 || return OOBToken()
+        return stmt.val
     elseif isa(stmt, PhiNode)
-        for i = 1:length(stmt.values)
-            isassigned(stmt.values, i) || continue
-            scan_ssa_use!(used, stmt.values[i])
-        end
+        x.use > length(stmt.values) && return OOBToken()
+        isassigned(stmt.values, x.use) || return UndefToken()
+        return stmt.values[x.use]
+    else
+        return OOBToken()
     end
 end
 
-function scan_ssa_uses!(used, stmts)
-    foreach(stmt->scan_ssa_use!(used, stmt), stmts)
+function Base.setindex!(x::UseRef, v)
+    stmt = x.urs.stmt
+    if isexpr(stmt, :call) || isexpr(stmt, :new)
+        x.use > length(stmt.args) && throw(BoundsError())
+        stmt.args[x.use] = v
+    elseif isa(stmt, GotoIfNot)
+        x.use == 1 || throw(BoundsError())
+        x.urs.stmt = GotoIfNot{Any}(v, stmt.dest)
+    elseif isa(stmt, ReturnNode) || isa(stmt, PiNode)
+        x.use == 1 || throw(BoundsError())
+        x.urs.stmt = typeof(stmt)(v)
+    elseif isa(stmt, PhiNode)
+        x.use > length(stmt.values) && throw(BoundsError())
+        isassigned(stmt.values, x.use) || throw(BoundsError())
+        stmt.values[x.use] = v
+    else
+        return OOBToken()
+    end
+end
+
+userefs(x) = UseRefIterator(x)
+
+Base.start(it::UseRefIterator) = 1
+function Base.next(it::UseRefIterator, use)
+    x = UseRef(it, use)
+    v = x[]
+    v === UndefToken() && return next(it, use + 1)
+    x, use + 1
+end
+function Base.done(it::UseRefIterator, use)
+    x, _ = next(it, use)
+    v = x[]
+    v === OOBToken() && return true
+    false
+end
+
+function scan_ssa_use!(used, stmt)
+    if isa(stmt, SSAValue)
+        push!(used, stmt.id)
+    end
+    for useref in userefs(stmt)
+        val = useref[]
+        if isa(val, SSAValue)
+            push!(used, val.id)
+        end
+    end
 end
 
 function print_node(io::IO, idx, stmt, used, maxsize; color = true)
@@ -83,7 +147,7 @@ print_ssa(io::IO, val) = isa(val, SSAValue) ? print(io, "%$(val.id)") : print(io
 function Base.show(io::IO, code::IRCode)
     used = Set{Int}()
     println(io, "Code")
-    scan_ssa_uses!(used, code.stmts)
+    foreach(stmt->scan_ssa_use!(used, stmt), code.stmts)
     foreach(((_a,_b,node),)->scan_ssa_use!(used, node), code.new_nodes)
     if isempty(used)
         maxsize = 0
@@ -145,7 +209,7 @@ mutable struct IncrementalCompact
     result::Vector{Any}
     result_types::Vector{Any}
     ssa_rename::Vector{Any}
-    used_ssas::Set{Int}
+    used_ssas::Vector{Int}
     late_fixup::Vector{Int}
     keep_meta::Bool
     new_nodes::Any
@@ -159,7 +223,7 @@ mutable struct IncrementalCompact
         result_types = Array{Any}(uninitialized, length(code.stmts) + length(code.new_nodes))
         ssa_rename = Any[SSAValue(i) for i = 1:(length(code.stmts) + length(code.new_nodes))]
         late_fixup = Vector{Int}()
-        used_ssas = Set{Int}()
+        used_ssas = fill(0, length(code.stmts) + length(code.new_nodes))
         new_nodes_buf = fieldtype(IRCode, :new_nodes)()
         new(code, result, result_types, ssa_rename, used_ssas, late_fixup, keep_meta, new_nodes, new_nodes_buf, 1, 1)
     end
@@ -180,6 +244,13 @@ end
 
 function Base.setindex!(compact::IncrementalCompact, v, idx)
     if idx < compact.result_idx
+        # Kill count for current uses
+        for ops in userefs(compact.result[idx])
+            val = ops[]
+            isa(val, SSAValue) && (compact.used_ssas[val.id] -= 1)
+        end
+        # Add count for new use
+        isa(v, SSAValue) && (compact.used_ssas[v.id] += 1)
         return compact.result[idx] = v
     else
         return compact.ir.stmts[idx] = v
@@ -300,6 +371,23 @@ function Base.next(compact::IncrementalCompact, (idx, old_result_idx)::Tuple{Int
     return (old_result_idx, compact.result[old_result_idx]), (compact.idx, compact.result_idx)
 end
 
+function maybe_erase_unused!(extra_worklist, compact, idx)
+    if stmt_effect_free(compact.result[idx])
+        for ops in userefs(compact.result[idx])
+            val = ops[]
+            if isa(val, SSAValue)
+                if compact.used_ssas[val.id] == 1
+                    if val.id < idx
+                        push!(extra_worklist, val.id)
+                    end
+                end
+                compact.used_ssas[val.id] -= 1
+            end
+        end
+        compact.result[idx] = nothing
+    end
+end
+
 function finish(compact::IncrementalCompact)
     for idx in compact.late_fixup
         stmt = compact.result[idx]
@@ -315,7 +403,7 @@ function finish(compact::IncrementalCompact)
                 if isa(val, OldSSAValue)
                     val = compact.ssa_rename[val.id]
                     if isa(val, SSAValue)
-                        push!(compact.used_ssas, val.id)
+                        compact.used_ssas[val.id] += 1
                     end
                 end
                 values[i] = val
@@ -328,10 +416,14 @@ function finish(compact::IncrementalCompact)
     resize!(compact.result, result_idx-1)
     resize!(compact.result_types, result_idx-1)
     # Perform simple DCE for unused values
-    for unused in setdiff(Set{Int}(1:length(compact.result)), compact.used_ssas)
-        if stmt_effect_free(compact.result[unused])
-            compact.result[unused] = nothing
-        end
+    extra_worklist = Int[]
+    for (idx, nused) in enumerate(compact.used_ssas)
+        idx >= result_idx && break
+        nused == 0 || continue
+        maybe_erase_unused!(extra_worklist, compact, idx)
+    end
+    while !isempty(extra_worklist)
+        maybe_erase_unused!(extra_worklist, compact, pop!(extra_worklist))
     end
     IRCode(compact.result, compact.result_types, Any[])
 end
