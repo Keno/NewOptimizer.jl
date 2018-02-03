@@ -1,5 +1,7 @@
 module NewOptimizer
 
-# package code goes here
+include("ir.jl")
+include("passes.jl")
+include("new_ir.jl")
 
 end # module
