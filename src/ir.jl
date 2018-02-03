@@ -15,7 +15,10 @@ function scan_ssa_use!(used, stmt)
     elseif isa(stmt, ReturnNode) || isa(stmt, PiNode)
         scan_ssa_use!(used, stmt.val)
     elseif isa(stmt, PhiNode)
-        foreach(arg->scan_ssa_use!(used, arg), stmt.values)
+        for i = 1:length(stmt.values)
+            isassigned(stmt.values, i) || continue
+            scan_ssa_use!(used, stmt.values[i])
+        end
     end
 end
 
@@ -31,13 +34,15 @@ function print_node(io::IO, idx, stmt, used, maxsize; color = true)
         print(io, " "^(maxsize+4))
     end
     if isa(stmt, PhiNode)
-        print(io, "φ ", '(', join(
-            map(zip(stmt.edges, stmt.values)) do (e, v)
+        args = map(1:length(stmt.edges)) do i
+            e = stmt.edges[i]
+            v = !isassigned(stmt.values, i) ? "#undef" :
                 sprint() do io′
-                    print(io′, e, " => ")
-                    print_ssa(io′, v)
+                    print_ssa(io′, stmt.values[i])
                 end
-            end, ", "), ')')
+            "$e => $v"
+        end
+        print(io, "φ ", '(', join(args, ", "), ')')
     elseif isa(stmt, PiNode)
         print(io, "π (")
         print_ssa(io, stmt.val)

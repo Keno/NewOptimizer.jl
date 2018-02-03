@@ -116,42 +116,6 @@ function lift_defuse(cfg, defuse)
     end
 end
 
-function scan_entry!(result, idx, stmt)
-    # NewVarNodes count as defs for the purpose
-    # of liveness analysis (i.e. they kill use chains)
-    if isa(stmt, NewvarNode)
-        push!(result[slot_id(stmt.slot)].defs, idx)
-    elseif isexpr(stmt, :(=))
-        if isa(stmt.args[1], SlotNumber)
-            push!(result[slot_id(stmt.args[1])].defs, idx)
-        end
-        scan_entry!(result, idx, stmt.args[2])
-    elseif isexpr(stmt, :call)
-        for arg in stmt.args
-            (isa(arg, SlotNumber) || isa(arg, TypedSlot)) || continue
-            push!(result[slot_id(arg)].uses, idx)
-        end
-    elseif isa(stmt, GotoIfNot)
-        scan_entry!(result, idx, stmt.cond)
-    elseif isa(stmt, SlotNumber) || isa(stmt, TypedSlot)
-        push!(result[slot_id(stmt)].uses, idx)
-    end
-end
-
-@inline slot_id(s) = isa(s, SlotNumber) ? (s::SlotNumber).id : (s::TypedSlot).id
-function scan_slot_def_use(nargs, ci)
-    nslots = length(ci.slotnames)
-    result = [SlotInfo() for i = 1:nslots]
-    # Set defs for arguments
-    for var in result[1:(1+nargs)]
-        push!(var.defs, 0)
-    end
-    for (idx, stmt) in enumerate(ci.code)
-        scan_entry!(result, idx, stmt)
-    end
-    result
-end
-
 struct DomTreeNode
     level::Int
     children::Vector{Int}
@@ -316,48 +280,6 @@ function rename_uses!(stmt, renames)
     return stmt
 end
 
-function renumber_ssa!(stmt, ssanums, new_ssa=false, used_ssa = Set{Int}())
-    if isa(stmt, SSAValue)
-        id = stmt.id + (new_ssa ? 0 : 1)
-        if id > length(ssanums)
-            return stmt
-        end
-        val = ssanums[id]
-        isa(val, SSAValue) && push!(used_ssa, val.id)
-        return val
-    end
-    if isexpr(stmt, :(=))
-        stmt.args[2] = renumber_ssa!(stmt.args[2], ssanums, new_ssa, used_ssa)
-        return stmt
-    end
-    if isa(stmt, GotoIfNot)
-        return GotoIfNot{Any}(renumber_ssa!(stmt.cond, ssanums, new_ssa, used_ssa), stmt.dest)
-    elseif isa(stmt, ReturnNode)
-        return ReturnNode{Any}(renumber_ssa!(stmt.val, ssanums, new_ssa, used_ssa))
-    elseif isa(stmt, PhiNode)
-        return PhiNode(stmt.edges, map(arg->renumber_ssa!(arg, ssanums, new_ssa, used_ssa), stmt.values))
-    elseif isa(stmt, PiNode)
-        return PiNode(renumber_ssa!(stmt.val, ssanums, new_ssa, used_ssa), stmt.typ)
-    end
-    if isexpr(stmt, :call)
-        for i = 1:length(stmt.args)
-            stmt.args[i] = renumber_ssa!(stmt.args[i], ssanums, new_ssa, used_ssa)
-        end
-        return stmt
-    end
-    return stmt
-end
-
-function make_ssa!(ci, idx, slot, typ)
-    (idx == 0) && return Argument(slot)
-    stmt = ci.code[idx]
-    @assert isexpr(stmt, :(=))
-    push!(ci.ssavaluetypes, typ)
-    ssa = length(ci.ssavaluetypes)-1
-    stmt.args[1] = SSAValue(ssa)
-    ssa
-end
-
 function first_insert_for_bb(code, cfg, block)
     for idx in cfg.blocks[block].stmts
         stmt = code[idx]
@@ -372,104 +294,6 @@ function typ_for_val(val, ci)
     isa(val, GlobalRef) && return typeof(getfield(val.mod, val.name))
     isa(val, SSAValue) && return ci.ssavaluetypes[val.id+1]
     return typeof(val)
-end
-
-function construct_ssa!(ci, cfg, domtree, defuse)
-    left = Int[]
-    defuse_blocks = lift_defuse(cfg, defuse)
-    phi_slots = [Vector{Int}() for _ = 1:length(cfg.blocks)]
-    phi_nodes = [Vector{Pair{Int,PhiNode}}() for _ = 1:length(cfg.blocks)]
-    phi_ssas = SSAValue[]
-    code = Any[nothing for _ = 1:length(ci.code)]
-    ir = IRCode(code)
-    for (idx, slot) in enumerate(defuse)
-        # No uses => no need for phi nodes
-        isempty(slot.uses) && continue
-        if length(slot.defs) == 1
-            if slot.defs[] == 0
-                typ = ci.slottypes[idx]
-            else
-                val = ci.code[slot.defs[]].args[2]
-                typ = typ_for_val(val, ci)
-            end
-            ssaval = make_ssa!(ci, slot.defs[], idx, typ)
-            fixup_uses!(ci, slot.uses, idx, ssaval)
-            continue
-        end
-        # TODO: Perform liveness here to eliminate dead phi nodes
-        phiblocks = idf(cfg, defuse_blocks, domtree, idx)
-        for block in phiblocks
-            push!(phi_slots[block], idx)
-            node = PhiNode()
-            ssa = insert_node!(ir, first_insert_for_bb(ci.code, cfg, block), Union{}, node)
-            push!(phi_nodes[block], ssa.id=>node)
-        end
-        push!(left, idx)
-    end
-    # Perform SSA renaming
-    worklist = Any[(1, 0, fill(SSAValue(-1), length(ci.slotnames)))]
-    visited = Set{Int}()
-    while true
-        (item, pred, incoming_vals) = pop!(worklist)
-        # Insert phi nodes if necessary
-        for (idx, slot) in enumerate(phi_slots[item])
-            ssaval, node = phi_nodes[item][idx]
-            push!(node.edges, pred)
-            incoming_val = incoming_vals[slot]
-            push!(node.values, incoming_val)
-            typ = typ_for_val(incoming_val, ci)
-            new_node_id = ssaval - length(ir.stmts)
-            old_insert, old_typ, _ = ir.new_nodes[new_node_id]
-            ir.new_nodes[new_node_id] = (old_insert, Union{old_typ, typ}, node)
-            incoming_vals[slot] = SSAValue(ssaval)
-        end
-        push!(visited, item)
-        for idx in cfg.blocks[item].stmts
-            stmt = ci.code[idx]
-            if isa(stmt, NewvarNode)
-                ci.code[idx] = nothing
-                continue
-            end
-            # Rename any uses
-            ci.code[idx] = rename_uses!(stmt, incoming_vals)
-            # Record a store
-            if isexpr(stmt, :(=)) && isa(stmt.args[1], SlotNumber)
-                id = slot_id(stmt.args[1])
-                val = stmt.args[2]
-                typ = typ_for_val(val, ci)
-                incoming_vals[id] = SSAValue(make_ssa!(ci, idx, id, typ))
-            end
-        end
-        for succ in cfg.blocks[item].succs
-            push!(worklist, (succ, item, copy(incoming_vals)))
-        end
-        isempty(worklist) && break
-    end
-    # Delete any instruction in unreachable blocks
-    for bb in setdiff(Set{Int}(1:length(cfg.blocks)), visited)
-        for idx in cfg.blocks[bb].stmts
-            ci.code[idx] = nothing
-        end
-    end
-    # Convert into IRCode form
-    ssavalmap = fill(SSAValue(-1), length(ci.ssavaluetypes)+1)
-    types = Type[Any for _ = 1:(length(code)+length(ir.new_nodes))]
-    # Detect statement positions for assignments and construct array
-    for (idx, stmt) in enumerate(ci.code)
-        if isexpr(stmt, :(=)) && isa(stmt.args[1], SSAValue)
-            @show stmt
-            ssavalmap[stmt.args[1].id + 1] = SSAValue(idx)
-            types[idx] = ci.ssavaluetypes[stmt.args[1].id + 1]
-            code[idx] = stmt.args[2]
-        else
-            code[idx] = stmt
-        end
-    end
-    # Renumber SSA values
-    code = map(stmt->renumber_ssa!(stmt, ssavalmap), code)
-    @show ir.new_nodes
-    new_nodes = map(((pt,typ,stmt),)->(pt, typ, renumber_ssa!(stmt, ssavalmap)), ir.new_nodes)
-    IRCode(code, types, new_nodes)
 end
 
 function is_call(stmt, sym)
@@ -547,7 +371,26 @@ function get_val_if_type_cmp(def)
     return (val, cmp)
 end
 
+function run_passes(f, args)
+    ci = NI.code_typed(f, args)[1].first
+    ci.code = map(normalize, ci.code)
+    cfg = compute_basic_blocks(ci.code)
+    @show cfg
+    defuse_insts = scan_slot_def_use(1, ci)
+    domtree = construct_domtree(cfg)
+    @show ci.code
+    ir = construct_ssa!(ci, cfg, domtree, defuse_insts)
+    @show ir
+    ir = compact!(ir)
+    predicate_insertion_pass!(ir, compute_basic_blocks(ir.stmts), domtree)
+    ir = compact!(ir)
+    ir = getfield_elim_pass!(ir)
+    ir = compact!(ir)
+    ir = type_lift_pass!(ir)
+end
+
 # Test Case
+#=
 @noinline foo() = rand(Bool) ? 2 : nothing
 @inline baz(x) = x ? (foo(), 1) : nothing
 function bar(arg)
@@ -580,3 +423,4 @@ ir = getfield_elim_pass!(ir)
 ir = compact!(ir)
 ir = type_lift_pass!(ir)
 @show compact!(ir)
+=#

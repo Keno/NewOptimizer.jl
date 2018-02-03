@@ -45,7 +45,6 @@ function getfield_elim_pass!(ir::IRCode)
         # TODO: Can use the domtree to eliminate unnecessary phis, but ok for now
     end
     ir = finish(compact)
-    @show ("before_phi", ir)
     for (idx, phi_locs) in insertions
         forwarded = ir.stmts[idx]
         forwarded_typ = ir.types[forwarded.id]
@@ -57,7 +56,6 @@ function getfield_elim_pass!(ir::IRCode)
         end
         ir.stmts[idx] = forwarded
     end
-    @show ("after_phi", ir)
     ir
 end
 
