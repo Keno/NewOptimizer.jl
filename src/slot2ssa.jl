@@ -8,7 +8,7 @@ function scan_entry!(result, idx, stmt)
             push!(result[slot_id(stmt.args[1])].defs, idx)
         end
         scan_entry!(result, idx, stmt.args[2])
-    elseif isexpr(stmt, :call)
+    elseif isexpr(stmt, :call) || isexpr(stmt, :new)
         for arg in stmt.args
             (isa(arg, SlotNumber) || isa(arg, TypedSlot)) || continue
             push!(result[slot_id(arg)].uses, idx)
@@ -64,7 +64,7 @@ function renumber_ssa!(stmt, ssanums, new_ssa=false, used_ssa = Set{Int}())
     elseif isa(stmt, PiNode)
         return PiNode(renumber_ssa!(stmt.val, ssanums, new_ssa, used_ssa), stmt.typ)
     end
-    if isexpr(stmt, :call)
+    if isexpr(stmt, :call) || isexpr(stmt, :new)
         for i = 1:length(stmt.args)
             stmt.args[i] = renumber_ssa!(stmt.args[i], ssanums, new_ssa, used_ssa)
         end
@@ -135,7 +135,6 @@ function construct_ssa!(ci, cfg, domtree, defuse)
             ssaval, node = phi_nodes[item][idx]
             push!(node.edges, pred)
             incoming_val = incoming_vals[slot]
-            @show incoming_val
             if incoming_val == undef_token
                 resize!(node.values, length(node.values)+1)
             else
@@ -147,6 +146,7 @@ function construct_ssa!(ci, cfg, domtree, defuse)
             ir.new_nodes[new_node_id] = (old_insert, Union{old_typ, typ}, node)
             incoming_vals[slot] = SSAValue(ssaval)
         end
+        (item in visited) && continue
         push!(visited, item)
         for idx in cfg.blocks[item].stmts
             stmt = ci.code[idx]

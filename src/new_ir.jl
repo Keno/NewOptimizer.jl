@@ -245,7 +245,7 @@ function fixup_use!(stmt, slot, ssa)
     elseif isa(stmt, ReturnNode)
         return ReturnNode{Any}(fixup_use!(stmt.val))
     end
-    if isexpr(stmt, :call)
+    if isexpr(stmt, :call) || isexpr(stmt, :new)
         for i = 1:length(stmt.args)
             stmt.args[i] = fixup_use!(stmt.args[i], slot, ssa)
         end
@@ -271,7 +271,7 @@ function rename_uses!(stmt, renames)
     elseif isa(stmt, ReturnNode)
         return ReturnNode{Any}(rename_uses!(stmt.val, renames))
     end
-    if isexpr(stmt, :call)
+    if isexpr(stmt, :call) || isexpr(stmt, :new)
         for i = 1:length(stmt.args)
             stmt.args[i] = rename_uses!(stmt.args[i], renames)
         end
@@ -306,6 +306,7 @@ end
 function stmt_effect_free(stmt)
     isa(stmt, PiNode) && return true
     isa(stmt, PhiNode) && return true
+    isexpr(stmt, :new) && return true
     return is_call(stmt, :tuple) || is_call(stmt, :getfield)
 end
 
@@ -354,6 +355,7 @@ function predicate_insertion_pass!(ir::IRCode, cfg, domtree)
         annotate_pred!(ir, cfg, domtree, true_block, val, true_val)
         annotate_pred!(ir, cfg, domtree, false_block, val, false_val)
     end
+    ir
 end
 
 function get_val_if_type_cmp(def)
@@ -375,16 +377,14 @@ function run_passes(f, args)
     ci = NI.code_typed(f, args)[1].first
     ci.code = map(normalize, ci.code)
     cfg = compute_basic_blocks(ci.code)
-    @show cfg
     defuse_insts = scan_slot_def_use(1, ci)
     domtree = construct_domtree(cfg)
-    @show ci.code
     ir = construct_ssa!(ci, cfg, domtree, defuse_insts)
-    @show ir
     ir = compact!(ir)
-    predicate_insertion_pass!(ir, compute_basic_blocks(ir.stmts), domtree)
+    ir = predicate_insertion_pass!(ir, compute_basic_blocks(ir.stmts), domtree)
     ir = compact!(ir)
     ir = getfield_elim_pass!(ir)
+    @show ir
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
 end

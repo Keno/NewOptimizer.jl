@@ -4,8 +4,12 @@ function getfield_elim_pass!(ir::IRCode)
     for (idx, stmt) in compact
         is_call(stmt, :getfield) || continue
         isa(stmt.args[2], SSAValue) || continue
-        isa(stmt.args[3], Int) || continue
-        field_idx = stmt.args[3]
+        @show stmt
+        @show typeof(stmt.args[3]
+        )
+        field = stmt.args[3]
+        isa(field, QuoteNode) && (field = field.value)
+        isa(field, Union{Int, Symbol}) || continue
         defidx = stmt.args[2].id
         def = compact[defidx]
         typeconstraint = types(compact)[defidx]
@@ -32,20 +36,30 @@ function getfield_elim_pass!(ir::IRCode)
             end
             break
         end
-        is_call(def, :tuple) || continue
-        forwarded = def.args[1+field_idx]
+        if is_call(def, :tuple)
+            forwarded = def.args[1+field]
+        elseif isexpr(def, :new)
+            typ = def.typ
+            !typ.mutable || continue
+            if isa(field, Symbol)
+                field = Base.fieldindex(typ, field, false)
+                field == 0 && continue
+            end
+            forwarded = def.args[1+field]
+        else
+            continue
+        end
         if !isempty(phi_locs) && isa(forwarded, SSAValue)
             # TODO: We have have to use BB ids for phi_locs
             # to avoid index invalidation.
             push!(insertions, (idx, phi_locs))
         end
-        @show (idx, compact.result_idx, forwarded)
         compact[idx] = forwarded
-        # For non-dominating load-store forward, we may have to insert extra phi nodes
-        # TODO: Can use the domtree to eliminate unnecessary phis, but ok for now
     end
     ir = finish(compact)
     for (idx, phi_locs) in insertions
+        # For non-dominating load-store forward, we may have to insert extra phi nodes
+        # TODO: Can use the domtree to eliminate unnecessary phis, but ok for now
         forwarded = ir.stmts[idx]
         forwarded_typ = ir.types[forwarded.id]
         for (pred, pos) in reverse!(phi_locs)

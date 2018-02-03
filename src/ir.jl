@@ -5,10 +5,13 @@ struct IRCode
 end
 IRCode(stmts) = IRCode(stmts, Type[], Tuple{Int, Type, Any}[])
 
+struct OldSSAValue
+    id::Int
+end
 
 function scan_ssa_use!(used, stmt)
     isa(stmt, SSAValue) && push!(used, stmt.id)
-    if isexpr(stmt, :call)
+    if isexpr(stmt, :call) || isexpr(stmt, :new)
         foreach(arg->scan_ssa_use!(used, arg), stmt.args)
     elseif isa(stmt, GotoIfNot)
         scan_ssa_use!(used, stmt.cond)
@@ -67,6 +70,10 @@ function print_node(io::IO, idx, stmt, used, maxsize; color = true)
         if stmt.typ !== Any
             print(io, "::$(stmt.typ)")
         end
+    elseif isexpr(stmt, :new)
+        print(io, "new(")
+        print(io, join(map(arg->sprint(io->print_ssa(io, arg)), stmt.args), ", "))
+        print(io, ")")
     else
         print(io, stmt)
     end
@@ -205,7 +212,7 @@ function Base.done(compact::IncrementalCompact, (idx, _)::Tuple{Int, Int})
     return idx > length(compact.ir.stmts) && isempty(compact.new_nodes)
 end
 
-function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, stmt, idx, keep_meta)
+function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, stmt, idx, processed_idx, keep_meta)
     if stmt === nothing
         # eliminate this node
     elseif !keep_meta && (isexpr(stmt, :meta) || isa(stmt, LineNumberNode))
@@ -234,6 +241,24 @@ function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, st
         end
         ssa_rename[idx] = SSAValue(result_idx)
         result_idx += 1
+    elseif isa(stmt, PhiNode)
+        values = Vector{Any}(uninitialized, length(stmt.values))
+        for i = 1:length(stmt.values)
+            isassigned(stmt.values, i) || continue
+            val = stmt.values[i]
+            if isa(val, SSAValue)
+                if val.id > processed_idx
+                    push!(late_fixup, result_idx)
+                    val = OldSSAValue(val.id)
+                else
+                    val = renumber_ssa!(val, ssa_rename, true, used_ssas)
+                end
+            end
+            values[i] = val
+        end
+        result[result_idx] = PhiNode(stmt.edges, values)
+        ssa_rename[idx] = SSAValue(result_idx)
+        result_idx += 1
     elseif isa(stmt, SSAValue) || (!isa(stmt, Expr) && !isa(stmt, PhiNode) && !isa(stmt, PiNode))
         # Constant or identity assign, replace uses of this
         # ssa value with its result
@@ -246,9 +271,9 @@ function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, st
     end
     return result_idx
 end
-function process_node!(compact::IncrementalCompact, result_idx, stmt, idx)
+function process_node!(compact::IncrementalCompact, result_idx, stmt, idx, processed_idx)
     process_node!(compact.result, result_idx, compact.ssa_rename,
-        compact.late_fixup, compact.used_ssas, stmt, idx, compact.keep_meta)
+        compact.late_fixup, compact.used_ssas, stmt, idx, processed_idx, compact.keep_meta)
 end
 
 function Base.next(compact::IncrementalCompact, (idx, old_result_idx)::Tuple{Int, Int})
@@ -260,7 +285,7 @@ function Base.next(compact::IncrementalCompact, (idx, old_result_idx)::Tuple{Int
         _, typ, new_node = popfirst!(compact.new_nodes)
         new_idx = length(compact.ir.stmts) + length(compact.ir.new_nodes) - length(compact.new_nodes)
         compact.result_types[old_result_idx] = typ
-        result_idx = process_node!(compact, old_result_idx, new_node, new_idx)
+        result_idx = process_node!(compact, old_result_idx, new_node, new_idx, idx)
         (old_result_idx == result_idx) && return next(compact, (idx, result_idx))
         compact.result_idx = result_idx
         return (old_result_idx, compact.result[old_result_idx]), (compact.idx, compact.result_idx)
@@ -268,7 +293,7 @@ function Base.next(compact::IncrementalCompact, (idx, old_result_idx)::Tuple{Int
     # This will get overwritten in future iterations if
     # result_idx is not, incremented, but that's ok and expected
     compact.result_types[old_result_idx] = compact.ir.types[idx]
-    result_idx = process_node!(compact, old_result_idx, compact.ir.stmts[idx], idx)
+    result_idx = process_node!(compact, old_result_idx, compact.ir.stmts[idx], idx, idx)
     (old_result_idx == result_idx) && return next(compact, (idx + 1, result_idx))
     compact.idx = idx + 1
     compact.result_idx = result_idx
@@ -282,6 +307,20 @@ function finish(compact::IncrementalCompact)
             compact.result[idx] = typeof(stmt)(compact.ssa_rename[stmt.label].id)
         elseif isa(stmt, GotoIfNot)
             compact.result[idx] = GotoIfNot(stmt.cond, compact.ssa_rename[stmt.dest].id)
+        elseif isa(stmt, PhiNode)
+            values = Vector{Any}(uninitialized, length(stmt.values))
+            for i = 1:length(stmt.values)
+                isassigned(stmt.values, i) || continue
+                val = stmt.values[i]
+                if isa(val, OldSSAValue)
+                    val = compact.ssa_rename[val.id]
+                    if isa(val, SSAValue)
+                        push!(compact.used_ssas, val.id)
+                    end
+                end
+                values[i] = val
+            end
+            compact.result[idx] = PhiNode(stmt.edges, values)
         end
     end
     # Record this somewhere?
