@@ -22,7 +22,7 @@ struct IRCode
     cfg::CFG
     new_nodes::Vector{Tuple{Int, Type, Any}}
 end
-IRCode(stmts) = IRCode(stmts, Type[], compute_basic_blocks(stmts), Tuple{Int, Type, Any}[])
+IRCode(stmts, cfg) = IRCode(stmts, Type[], cfg, Tuple{Int, Type, Any}[])
 
 struct OldSSAValue
     id::Int
@@ -124,7 +124,7 @@ function ssamap(f, stmt)
 end
 
 
-function print_node(io::IO, idx, stmt, used, maxsize; color = true)
+function print_node(io::IO, idx, stmt, used, maxsize; color = true, print_typ=true)
     if idx in used
         pad = " "^(maxsize-length(string(idx)))
         print(io, "%$idx $pad= ")
@@ -162,7 +162,7 @@ function print_node(io::IO, idx, stmt, used, maxsize; color = true)
         print(io, "(")
         print(io, join(map(arg->sprint(io->print_ssa(io, arg)), stmt.args[2:end]), ", "))
         print(io, ")")
-        if stmt.typ !== Any
+        if print_typ && stmt.typ !== Any
             print(io, "::$(stmt.typ)")
         end
     elseif isexpr(stmt, :new)
@@ -193,15 +193,14 @@ function Base.show(io::IO, code::IRCode)
         bbrange = cfg.blocks[bb_idx].stmts
         if idx != last(bbrange)
             if idx == first(bbrange)
-                print(io, "┌ ")
+                print(io, "$(bb_idx) ─ ")
             else
-                print(io, "│ ")
+                print(io, "│   ")
             end
         end
         print_sep = false
         if idx == last(bbrange)
             print_sep = true
-            bb_idx += 1
         end
         floop = true
         while !isempty(new_nodes) && Base.peek(new_nodes)[1] == idx
@@ -209,27 +208,39 @@ function Base.show(io::IO, code::IRCode)
             node_idx = length(code.stmts) + length(code.new_nodes) - length(new_nodes)
             if print_sep
                 if floop
-                    print(io, "┌ ")
+                    print(io, "$(bb_idx) ─ ")
                 else
-                    print(io, "│ ")
+                    print(io, "│   ")
                 end
             end
             print_sep = true
             floop = false
+            print_ssa_typ = !isa(node, PiNode) && node_idx in used
             Base.with_output_color(:yellow, io) do io′
-                print_node(io′, node_idx, node, used, maxsize; color = false)
+                print_node(io′, node_idx, node, used, maxsize; color = false,
+                    print_typ=!print_ssa_typ || (isa(node, Expr) && typ != node.typ))
             end
-            if !isa(node, PiNode) && node_idx in used
+            if print_ssa_typ
                 printstyled(io, "::$(typ)", color=:red)
             end
             println(io)
         end
         if print_sep
-            print(io, idx == last(bbrange) ? "└ " : "│ ")
+            if idx == first(bbrange) && floop
+                print(io, "$(bb_idx) ─ ")
+            else
+                print(io, idx == last(bbrange) ? "└── " : "│  ")
+            end
         end
-        print_node(io, idx, stmt, used, maxsize)
-        if !isa(stmt, PiNode) && idx in used
-            printstyled(io, "::$(code.types[idx])", color=:red)
+        if idx == last(bbrange)
+            bb_idx += 1
+        end
+        typ = code.types[idx]
+        print_ssa_typ = !isa(stmt, PiNode) && idx in used
+        print_node(io, idx, stmt, used, maxsize,
+            print_typ=!print_ssa_typ || (isa(stmt, Expr) && typ != stmt.typ))
+        if print_ssa_typ
+            printstyled(io, "::$(typ)", color=:red)
         end
         println(io)
     end
@@ -315,33 +326,16 @@ function Base.done(compact::IncrementalCompact, (idx, _a, _b)::Tuple{Int, Int, I
 end
 
 function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, stmt, idx, processed_idx, keep_meta)
+    ssa_rename[idx] = SSAValue(result_idx)
     if stmt === nothing
         # eliminate this node
     elseif !keep_meta && (isexpr(stmt, :meta) || isa(stmt, LineNumberNode))
         # eliminate this node
+    elseif isa(stmt, GotoNode)
+        result[result_idx] = stmt
+        result_idx += 1
     elseif isexpr(stmt, :call) || isexpr(stmt, :invoke) || isa(stmt, ReturnNode)
         result[result_idx] = renumber_ssa!(stmt, ssa_rename, true, used_ssas)
-        ssa_rename[idx] = SSAValue(result_idx)
-        result_idx += 1
-    elseif isa(stmt, GotoNode) || isa(stmt, LabelNode)
-        target = stmt.label
-        if target >= idx
-            push!(late_fixup, result_idx)
-            result[result_idx] = stmt
-        else
-            result[result_idx] = typeof(stmt)(ssa_rename[stmt.label].id)
-        end
-        ssa_rename[idx] = SSAValue(result_idx)
-        result_idx += 1
-    elseif isa(stmt, GotoIfNot)
-        target = stmt.dest
-        if target > idx
-            push!(late_fixup, result_idx)
-            result[result_idx] = GotoIfNot(renumber_ssa!(stmt.cond, ssa_rename, true, used_ssas), stmt.dest)
-        else
-            result[result_idx] = GotoIfNot(renumber_ssa!(stmt.cond, ssa_rename, true, used_ssas), ssa_rename[stmt.dest].id)
-        end
-        ssa_rename[idx] = SSAValue(result_idx)
         result_idx += 1
     elseif isa(stmt, PhiNode)
         values = Vector{Any}(uninitialized, length(stmt.values))
@@ -359,16 +353,14 @@ function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, st
             values[i] = val
         end
         result[result_idx] = PhiNode(stmt.edges, values)
-        ssa_rename[idx] = SSAValue(result_idx)
         result_idx += 1
-    elseif isa(stmt, SSAValue) || (!isa(stmt, Expr) && !isa(stmt, PhiNode) && !isa(stmt, PiNode))
+    elseif isa(stmt, SSAValue) || (!isa(stmt, Expr) && !isa(stmt, PhiNode) && !isa(stmt, PiNode) && !isa(stmt, GotoIfNot))
         # Constant or identity assign, replace uses of this
         # ssa value with its result
         stmt = isa(stmt, SSAValue) ? ssa_rename[stmt.id] : stmt
         ssa_rename[idx] = stmt
     else
         result[result_idx] = renumber_ssa!(stmt, ssa_rename, true, used_ssas)
-        ssa_rename[idx] = SSAValue(result_idx)
         result_idx += 1
     end
     return result_idx
@@ -414,7 +406,7 @@ function Base.next(compact::IncrementalCompact, (idx, active_bb, old_result_idx)
     if idx == last(bb.stmts)
         compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, first(bb.stmts):result_idx-1)
         active_bb += 1
-        if active_bb < length(compact.ir.cfg.blocks)
+        if active_bb <= length(compact.ir.cfg.blocks)
             new_bb = compact.ir.cfg.blocks[active_bb]
             compact.ir.cfg.blocks[active_bb] = BasicBlock(new_bb,
                 result_idx:last(new_bb.stmts))
@@ -446,30 +438,28 @@ end
 function finish(compact::IncrementalCompact)
     for idx in compact.late_fixup
         stmt = compact.result[idx]
-        if isa(stmt, GotoNode) || isa(stmt, LabelNode)
-            compact.result[idx] = typeof(stmt)(compact.ssa_rename[stmt.label].id)
-        elseif isa(stmt, GotoIfNot)
-            compact.result[idx] = GotoIfNot(stmt.cond, compact.ssa_rename[stmt.dest].id)
-        elseif isa(stmt, PhiNode)
-            values = Vector{Any}(uninitialized, length(stmt.values))
-            for i = 1:length(stmt.values)
-                isassigned(stmt.values, i) || continue
-                val = stmt.values[i]
-                if isa(val, OldSSAValue)
-                    val = compact.ssa_rename[val.id]
-                    if isa(val, SSAValue)
-                        compact.used_ssas[val.id] += 1
-                    end
+        @assert isa(stmt, PhiNode)
+        values = Vector{Any}(uninitialized, length(stmt.values))
+        for i = 1:length(stmt.values)
+            isassigned(stmt.values, i) || continue
+            val = stmt.values[i]
+            if isa(val, OldSSAValue)
+                val = compact.ssa_rename[val.id]
+                if isa(val, SSAValue)
+                    compact.used_ssas[val.id] += 1
                 end
-                values[i] = val
             end
-            compact.result[idx] = PhiNode(stmt.edges, values)
+            values[i] = val
         end
+        compact.result[idx] = PhiNode(stmt.edges, values)
     end
     # Record this somewhere?
     result_idx = compact.result_idx
     resize!(compact.result, result_idx-1)
     resize!(compact.result_types, result_idx-1)
+    bb = compact.ir.cfg.blocks[end]
+    compact.ir.cfg.blocks[end] = BasicBlock(bb,
+                first(bb.stmts):result_idx-1)
     # Perform simple DCE for unused values
     extra_worklist = Int[]
     for (idx, nused) in enumerate(compact.used_ssas)

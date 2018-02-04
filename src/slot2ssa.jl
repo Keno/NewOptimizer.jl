@@ -78,7 +78,7 @@ function construct_ssa!(ci, cfg, domtree, defuse)
     phi_nodes = [Vector{Pair{Int,PhiNode}}() for _ = 1:length(cfg.blocks)]
     phi_ssas = SSAValue[]
     code = Any[nothing for _ = 1:length(ci.code)]
-    ir = IRCode(code)
+    ir = IRCode(code, cfg)
     for (idx, slot) in enumerate(defuse)
         # No uses => no need for phi nodes
         isempty(slot.uses) && continue
@@ -160,6 +160,11 @@ function construct_ssa!(ci, cfg, domtree, defuse)
             ssavalmap[stmt.args[1].id + 1] = SSAValue(idx)
             types[idx] = ci.ssavaluetypes[stmt.args[1].id + 1]
             code[idx] = stmt.args[2]
+        # Convert GotoNode/GotoIfNot to BB addressing
+        elseif isa(stmt, GotoNode)
+            code[idx] = GotoNode(block_for_inst(cfg, stmt.label))
+        elseif isa(stmt, GotoIfNot)
+            code[idx] = GotoIfNot{Any}(stmt.cond, block_for_inst(cfg, stmt.dest))
         else
             code[idx] = stmt
         end

@@ -36,11 +36,11 @@ function normalize(expr)
         return GotoIfNot{Any}(expr.args...)
     elseif isexpr(expr, :return)
         return ReturnNode{Any}(expr.args...)
+    elseif isa(expr, LabelNode)
+        return nothing
     end
     expr
 end
-
-
 
 function block_for_inst(index, inst)
     searchsortedfirst(index, inst, lt=(<=))
@@ -48,25 +48,31 @@ end
 block_for_inst(cfg::CFG, inst) = block_for_inst(cfg.index, inst)
 
 function compute_basic_blocks(stmts::Vector{Any})
-    f = 1
-    basic_block_index = Int[]
-    blocks = BasicBlock[]
-    # First go through and split statements into blocks
+    jump_dests = Set{Int}(1)
+    terminators = Vector{Int}()
+    # First go through and compute jump destinations
     for (idx, stmt) in pairs(stmts)
-        # LabelNode starts a new BasicBlock
-        if isa(stmt, LabelNode)
-            if (f <= idx - 1)
-                push!(blocks, BasicBlock(f:idx-1))
-                push!(basic_block_index, idx)
-            end
-            f = idx
         # Terminators
-        elseif isa(stmt, Union{GotoIfNot, GotoNode, ReturnNode})
-            push!(blocks, BasicBlock(f:idx))
-            f = idx + 1
-            push!(basic_block_index, f)
+        if isa(stmt, Union{GotoIfNot, GotoNode, ReturnNode})
+            push!(terminators, idx)
+            isa(stmt, ReturnNode) && continue
+            if isa(stmt, GotoIfNot)
+                push!(jump_dests, idx+1)
+                push!(jump_dests, stmt.dest)
+            else
+                push!(jump_dests, stmt.label)
+            end
         end
     end
+    bb_starts = sort(collect(jump_dests))
+    push!(bb_starts, length(stmts) + 1)
+    # Compute ranges
+    basic_block_index = Int[]
+    blocks = map(zip(bb_starts, Iterators.drop(bb_starts, 1))) do (first, last)
+        push!(basic_block_index, first)
+        BasicBlock(first:(last-1))
+    end
+    popfirst!(basic_block_index)
     # Compute successors/predecessors
     for (num, b) in pairs(blocks)
         terminator = stmts[last(b.stmts)]
@@ -316,7 +322,8 @@ function insert_node!(ir::IRCode, pos, typ, val)
     return SSAValue(length(ir.stmts) + length(ir.new_nodes))
 end
 
-function predicate_insertion_pass!(ir::IRCode, cfg, domtree)
+function predicate_insertion_pass!(ir::IRCode, domtree)
+    cfg = ir.cfg
     for (idx, stmt) in pairs(ir.stmts)
         !isa(stmt, GotoIfNot) && continue
         !isa(stmt.cond, SSAValue) && continue
@@ -365,10 +372,8 @@ function run_passes(ci::CodeInfo, nargs::Int)
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, cfg, domtree, defuse_insts)
-    @show ir
     ir = compact!(ir)
-    @show ir
-    ir = predicate_insertion_pass!(ir, compute_basic_blocks(ir.stmts), domtree)
+    ir = predicate_insertion_pass!(ir, domtree)
     ir = getfield_elim_pass!(ir)
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
