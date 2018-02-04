@@ -10,8 +10,7 @@ function undef_vars(x::Bool)
 end
 
 let ir = NewOptimizer.run_passes(undef_vars, Tuple{Bool})
-    phi = ir.stmts[3]
-    @test isa(phi, NewOptimizer.PhiNode)
+    phi = first(filter(stmt->isa(stmt, NewOptimizer.PhiNode), ir.stmts))
     @test 1 == count(i->!isassigned(phi.values, i), 1:length(phi.values))
 end
 
@@ -24,7 +23,11 @@ function loop()
 end
 
 let ir = NewOptimizer.run_passes(loop, Tuple{})
-    # Maybe test some things here
+    # The first block is completely dead. Make
+    # sure we maintain it nevertheless for CFG integrity
+    @test length(ir.cfg.blocks) == 5
+    @test length(ir.cfg.blocks[1].stmts) == 1
+    @test ir.stmts[1] == nothing
 end
 
 # Test from base

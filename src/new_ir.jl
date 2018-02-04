@@ -15,15 +15,6 @@ struct PiNode
     typ::Type
 end
 
-struct BasicBlock
-    stmts::UnitRange{Int}
-    preds::Vector{Int}
-    succs::Vector{Int}
-end
-function BasicBlock(stmts::UnitRange{Int})
-    BasicBlock(stmts, Int[], Int[])
-end
-
 #Maybe:
 #struct LabelNode
 #    ninstrs::Int
@@ -49,10 +40,6 @@ function normalize(expr)
     expr
 end
 
-struct CFG
-    blocks::Vector{BasicBlock}
-    index::Vector{Int}
-end
 
 
 function block_for_inst(index, inst)
@@ -317,14 +304,9 @@ end
 function annotate_pred!(ir, cfg, domtree, root, val, replacement)
     for bb in dominated(domtree, root)
         for idx in cfg.blocks[bb].stmts
-            urs = userefs(ir.stmts[idx])
-            for ops in urs
-                use = ops[]
-                if isa(use, SSAValue) && (use.id == val.id)
-                    ops[] = replacement
-                end
+            ir.stmts[idx] = ssamap(ir.stmts[idx]) do use
+                use.id == val.id ? replacement : use
             end
-            ir.stmts[idx] = urs[]
         end
     end
 end
@@ -377,19 +359,32 @@ function get_val_if_type_cmp(def)
     return (val, cmp)
 end
 
-function run_passes(f, args)
-    ci = NI.code_typed(f, args)[1].first
+function run_passes(ci::CodeInfo, nargs::Int)
     ci.code = map(normalize, ci.code)
     cfg = compute_basic_blocks(ci.code)
-    defuse_insts = scan_slot_def_use(length(args.parameters), ci)
+    defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, cfg, domtree, defuse_insts)
+    @show ir
     ir = compact!(ir)
+    @show ir
     ir = predicate_insertion_pass!(ir, compute_basic_blocks(ir.stmts), domtree)
     ir = getfield_elim_pass!(ir)
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
     ir
+end
+
+function run_passes(f, args)
+    ci = NI.code_typed(f, args)[1].first
+    run_passes(ci, length(args.parameters))
+end
+
+function run_passes_ci(f, args)
+    ci = NI.code_typed(f, args)[1].first
+    ir = run_passes(ci, length(args.parameters))
+    replace_code!(ci, ir, length(args.parameters))
+    ci
 end
 
 # Test Case

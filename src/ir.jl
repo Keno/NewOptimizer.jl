@@ -1,9 +1,28 @@
+struct BasicBlock
+    stmts::UnitRange{Int}
+    preds::Vector{Int}
+    succs::Vector{Int}
+end
+function BasicBlock(stmts::UnitRange{Int})
+    BasicBlock(stmts, Int[], Int[])
+end
+function BasicBlock(old_bb, stmts)
+    BasicBlock(stmts, old_bb.preds, old_bb.succs)
+end
+
+struct CFG
+    blocks::Vector{BasicBlock}
+    index::Vector{Int}
+end
+
+
 struct IRCode
     stmts::Vector{Any}
     types::Vector{Type}
+    cfg::CFG
     new_nodes::Vector{Tuple{Int, Type, Any}}
 end
-IRCode(stmts) = IRCode(stmts, Type[], Tuple{Int, Type, Any}[])
+IRCode(stmts) = IRCode(stmts, Type[], compute_basic_blocks(stmts), Tuple{Int, Type, Any}[])
 
 struct OldSSAValue
     id::Int
@@ -93,6 +112,18 @@ function scan_ssa_use!(used, stmt)
     end
 end
 
+function ssamap(f, stmt)
+    urs = userefs(stmt)
+    for op in urs
+        val = op[]
+        if isa(val, SSAValue)
+            op[] = f(val)
+        end
+    end
+    urs[]
+end
+
+
 function print_node(io::IO, idx, stmt, used, maxsize; color = true)
     if idx in used
         pad = " "^(maxsize-length(string(idx)))
@@ -155,7 +186,7 @@ function Base.show(io::IO, code::IRCode)
         maxused = maximum(used)
         maxsize = length(string(maxused))
     end
-    cfg = compute_basic_blocks(code.stmts)
+    cfg = code.cfg
     bb_idx = 1
     new_nodes = Iterators.Stateful(sort(code.new_nodes, by = x->x[1]))
     for (idx, stmt) in enumerate(code.stmts)
@@ -278,8 +309,8 @@ function value_typ(ir::IncrementalCompact, value)
 end
 
 
-Base.start(compact::IncrementalCompact) = (1,1)
-function Base.done(compact::IncrementalCompact, (idx, _)::Tuple{Int, Int})
+Base.start(compact::IncrementalCompact) = (1,1,1)
+function Base.done(compact::IncrementalCompact, (idx, _a, _b)::Tuple{Int, Int, Int})
     return idx > length(compact.ir.stmts) && isempty(compact.new_nodes)
 end
 
@@ -347,11 +378,12 @@ function process_node!(compact::IncrementalCompact, result_idx, stmt, idx, proce
         compact.late_fixup, compact.used_ssas, stmt, idx, processed_idx, compact.keep_meta)
 end
 
-function Base.next(compact::IncrementalCompact, (idx, old_result_idx)::Tuple{Int, Int})
+function Base.next(compact::IncrementalCompact, (idx, active_bb, old_result_idx)::Tuple{Int, Int, Int})
     if length(compact.result) < old_result_idx
         resize!(compact.result, old_result_idx)
         resize!(compact.result_types, old_result_idx)
     end
+    bb = compact.ir.cfg.blocks[active_bb]
     if !isempty(compact.new_nodes) && Base.peek(compact.new_nodes)[1] == idx
         _, typ, new_node = popfirst!(compact.new_nodes)
         new_idx = length(compact.ir.stmts) + length(compact.ir.new_nodes) - length(compact.new_nodes)
@@ -359,16 +391,39 @@ function Base.next(compact::IncrementalCompact, (idx, old_result_idx)::Tuple{Int
         result_idx = process_node!(compact, old_result_idx, new_node, new_idx, idx)
         (old_result_idx == result_idx) && return next(compact, (idx, result_idx))
         compact.result_idx = result_idx
-        return (old_result_idx, compact.result[old_result_idx]), (compact.idx, compact.result_idx)
+        if old_result_idx > last(bb.stmts)
+            compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, first(bb.stmts):old_result_idx)
+        end
+        return (old_result_idx, compact.result[old_result_idx]), (compact.idx, active_bb, compact.result_idx)
     end
     # This will get overwritten in future iterations if
     # result_idx is not, incremented, but that's ok and expected
     compact.result_types[old_result_idx] = compact.ir.types[idx]
     result_idx = process_node!(compact, old_result_idx, compact.ir.stmts[idx], idx, idx)
-    (old_result_idx == result_idx) && return next(compact, (idx + 1, result_idx))
+    if idx == last(bb.stmts)
+        # If this was the last statement in the BB and we decided to skip it, insert a
+        # dummy `nothing` node, to prevent changing the structure of the CFG
+        if result_idx == first(bb.stmts)
+            compact.result[old_result_idx] = nothing
+            result_idx = old_result_idx + 1
+        end
+    end
+    if old_result_idx > last(bb.stmts)
+        compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, first(bb.stmts):old_result_idx)
+    end
+    if idx == last(bb.stmts)
+        compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, first(bb.stmts):result_idx-1)
+        active_bb += 1
+        if active_bb < length(compact.ir.cfg.blocks)
+            new_bb = compact.ir.cfg.blocks[active_bb]
+            compact.ir.cfg.blocks[active_bb] = BasicBlock(new_bb,
+                result_idx:last(new_bb.stmts))
+        end
+    end
+    (old_result_idx == result_idx) && return next(compact, (idx + 1, active_bb, result_idx))
     compact.idx = idx + 1
     compact.result_idx = result_idx
-    return (old_result_idx, compact.result[old_result_idx]), (compact.idx, compact.result_idx)
+    return (old_result_idx, compact.result[old_result_idx]), (compact.idx, active_bb, compact.result_idx)
 end
 
 function maybe_erase_unused!(extra_worklist, compact, idx)
@@ -425,7 +480,7 @@ function finish(compact::IncrementalCompact)
     while !isempty(extra_worklist)
         maybe_erase_unused!(extra_worklist, compact, pop!(extra_worklist))
     end
-    IRCode(compact.result, compact.result_types, Any[])
+    IRCode(compact.result, compact.result_types, compact.ir.cfg, Any[])
 end
 
 function compact!(code::IRCode)

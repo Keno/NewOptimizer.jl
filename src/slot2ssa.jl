@@ -50,14 +50,7 @@ end
 
 function renumber_ssa!(stmt, ssanums, new_ssa=false, used_ssa = nothing)
     isa(stmt, SSAValue) && return renumber_ssa(stmt, ssanums, new_ssa, used_ssa)
-    urs = userefs(stmt)
-    for op in urs
-        val = op[]
-        if isa(val, SSAValue)
-            op[] = renumber_ssa(val, ssanums, new_ssa, used_ssa)
-        end
-    end
-    return urs[]
+    return ssamap(val->renumber_ssa(val, ssanums, new_ssa, used_ssa), stmt)
 end
 
 function make_ssa!(ci, idx, slot, typ)
@@ -174,5 +167,5 @@ function construct_ssa!(ci, cfg, domtree, defuse)
     # Renumber SSA values
     code = map(stmt->renumber_ssa!(stmt, ssavalmap), code)
     new_nodes = map(((pt,typ,stmt),)->(pt, typ, renumber_ssa!(stmt, ssavalmap)), ir.new_nodes)
-    IRCode(code, types, new_nodes)
+    IRCode(code, types, cfg, new_nodes)
 end
