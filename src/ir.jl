@@ -1,9 +1,23 @@
+"""
+Like UnitRange{Int}, but can handle the `last` field, being temporarily
+< first (this can happen during compacting)
+"""
+struct StmtRange <: Base.AbstractUnitRange{Int}
+    first::Int
+    last::Int
+end
+Base.first(r::StmtRange) = r.first
+Base.last(r::StmtRange) = r.last
+Base.start(r::StmtRange) = 0
+Base.done(r::StmtRange, state) = r.last - r.first < state
+Base.next(r::StmtRange, state) = (r.first + state, state + 1)
+
 struct BasicBlock
-    stmts::UnitRange{Int}
+    stmts::StmtRange
     preds::Vector{Int}
     succs::Vector{Int}
 end
-function BasicBlock(stmts::UnitRange{Int})
+function BasicBlock(stmts::StmtRange)
     BasicBlock(stmts, Int[], Int[])
 end
 function BasicBlock(old_bb, stmts)
@@ -18,13 +32,18 @@ end
 
 struct IRCode
     stmts::Vector{Any}
-    types::Vector{Type}
+    types::Vector{Any}
     cfg::CFG
     new_nodes::Vector{Tuple{Int, Type, Any}}
+    mod::Module
 end
-IRCode(stmts, cfg) = IRCode(stmts, Type[], cfg, Tuple{Int, Type, Any}[])
+IRCode(stmts, cfg, mod) = IRCode(stmts, Any[], cfg, Tuple{Int, Type, Any}[], mod)
 
 struct OldSSAValue
+    id::Int
+end
+
+struct NewSSAValue
     id::Int
 end
 
@@ -46,7 +65,8 @@ end
 
 function Base.getindex(x::UseRef)
     stmt = x.urs.stmt
-    if isexpr(stmt, :call) || isexpr(stmt, :new)
+    if isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
+       isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) || isexpr(stmt, :foreigncall)
         x.use > length(stmt.args) && return OOBToken()
         stmt.args[x.use]
     elseif isa(stmt, GotoIfNot)
@@ -66,15 +86,20 @@ end
 
 function Base.setindex!(x::UseRef, v)
     stmt = x.urs.stmt
-    if isexpr(stmt, :call) || isexpr(stmt, :new)
+    if isexpr(stmt, :call) || isexpr(stmt, :invoke) ||
+       isexpr(stmt, :new) || isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) ||
+       isexpr(stmt, :foreigncall)
         x.use > length(stmt.args) && throw(BoundsError())
         stmt.args[x.use] = v
     elseif isa(stmt, GotoIfNot)
         x.use == 1 || throw(BoundsError())
         x.urs.stmt = GotoIfNot{Any}(v, stmt.dest)
-    elseif isa(stmt, ReturnNode) || isa(stmt, PiNode)
+    elseif isa(stmt, ReturnNode)
         x.use == 1 || throw(BoundsError())
         x.urs.stmt = typeof(stmt)(v)
+    elseif isa(stmt, PiNode)
+        x.use == 1 || throw(BoundsError())
+        x.urs.stmt = typeof(stmt)(v, stmt.typ)
     elseif isa(stmt, PhiNode)
         x.use > length(stmt.values) && throw(BoundsError())
         isassigned(stmt.values, x.use) || throw(BoundsError())
@@ -187,15 +212,18 @@ function Base.show(io::IO, code::IRCode)
         maxsize = length(string(maxused))
     end
     cfg = code.cfg
+    max_bb_idx_size = length(string(length(cfg.blocks)))
     bb_idx = 1
-    new_nodes = Iterators.Stateful(sort(code.new_nodes, by = x->x[1]))
+    perm = sortperm(code.new_nodes, by = x->x[1])
+    new_nodes_perm = Iterators.Stateful(perm)
     for (idx, stmt) in enumerate(code.stmts)
         bbrange = cfg.blocks[bb_idx].stmts
+        bb_pad = max_bb_idx_size - length(string(bb_idx))
         if idx != last(bbrange)
             if idx == first(bbrange)
-                print(io, "$(bb_idx) ─ ")
+                print(io, "$(bb_idx) ","─"^(1+bb_pad)," ")
             else
-                print(io, "│   ")
+                print(io, "│  "," "^max_bb_idx_size)
             end
         end
         print_sep = false
@@ -203,14 +231,15 @@ function Base.show(io::IO, code::IRCode)
             print_sep = true
         end
         floop = true
-        while !isempty(new_nodes) && Base.peek(new_nodes)[1] == idx
-            _, typ, node = popfirst!(new_nodes)
-            node_idx = length(code.stmts) + length(code.new_nodes) - length(new_nodes)
+        while !isempty(new_nodes_perm) && code.new_nodes[Base.peek(new_nodes_perm)][1] == idx
+            node_idx = popfirst!(new_nodes_perm)
+            _, typ, node = code.new_nodes[node_idx]
+            node_idx += length(code.stmts)
             if print_sep
                 if floop
-                    print(io, "$(bb_idx) ─ ")
+                    print(io, "$(bb_idx) ","─"^(1+bb_pad)," ")
                 else
-                    print(io, "│   ")
+                    print(io, "│  "," "^max_bb_idx_size)
                 end
             end
             print_sep = true
@@ -227,9 +256,10 @@ function Base.show(io::IO, code::IRCode)
         end
         if print_sep
             if idx == first(bbrange) && floop
-                print(io, "$(bb_idx) ─ ")
+                print(io, "$(bb_idx) ","─"^(1+bb_pad)," ")
             else
-                print(io, idx == last(bbrange) ? "└── " : "│  ")
+                print(io, idx == last(bbrange) ? string("└", "─"^(1+max_bb_idx_size), " ") :
+                    string("│  ", " "^max_bb_idx_size))
             end
         end
         if idx == last(bbrange)
@@ -254,20 +284,17 @@ mutable struct IncrementalCompact
     used_ssas::Vector{Int}
     late_fixup::Vector{Int}
     keep_meta::Bool
-    new_nodes::Any
-    new_nodes_buf::fieldtype(IRCode, :new_nodes)
+    new_nodes_perm::Any
     idx::Int
     result_idx::Int
     function IncrementalCompact(code::IRCode; keep_meta = false)
-        sort!(code.new_nodes, by=x->x[1])
-        new_nodes = Iterators.Stateful(code.new_nodes)
+        new_nodes_perm = Iterators.Stateful(sortperm(code.new_nodes, by=x->x[1]))
         result = Array{Any}(uninitialized, length(code.stmts) + length(code.new_nodes))
         result_types = Array{Any}(uninitialized, length(code.stmts) + length(code.new_nodes))
         ssa_rename = Any[SSAValue(i) for i = 1:(length(code.stmts) + length(code.new_nodes))]
         late_fixup = Vector{Int}()
         used_ssas = fill(0, length(code.stmts) + length(code.new_nodes))
-        new_nodes_buf = fieldtype(IRCode, :new_nodes)()
-        new(code, result, result_types, ssa_rename, used_ssas, late_fixup, keep_meta, new_nodes, new_nodes_buf, 1, 1)
+        new(code, result, result_types, ssa_rename, used_ssas, late_fixup, keep_meta, new_nodes_perm, 1, 1)
     end
 end
 
@@ -322,7 +349,7 @@ end
 
 Base.start(compact::IncrementalCompact) = (1,1,1)
 function Base.done(compact::IncrementalCompact, (idx, _a, _b)::Tuple{Int, Int, Int})
-    return idx > length(compact.ir.stmts) && isempty(compact.new_nodes)
+    return idx > length(compact.ir.stmts) && isempty(compact.new_nodes_perm)
 end
 
 function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, stmt, idx, processed_idx, keep_meta)
@@ -334,7 +361,8 @@ function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, st
     elseif isa(stmt, GotoNode)
         result[result_idx] = stmt
         result_idx += 1
-    elseif isexpr(stmt, :call) || isexpr(stmt, :invoke) || isa(stmt, ReturnNode)
+    elseif isexpr(stmt, :call) || isexpr(stmt, :invoke) || isa(stmt, ReturnNode) || isexpr(stmt, :gc_preserve_begin) ||
+           isexpr(stmt, :gc_preserve_end) || isexpr(stmt, :foreigncall)
         result[result_idx] = renumber_ssa!(stmt, ssa_rename, true, used_ssas)
         result_idx += 1
     elseif isa(stmt, PhiNode)
@@ -376,16 +404,14 @@ function Base.next(compact::IncrementalCompact, (idx, active_bb, old_result_idx)
         resize!(compact.result_types, old_result_idx)
     end
     bb = compact.ir.cfg.blocks[active_bb]
-    if !isempty(compact.new_nodes) && Base.peek(compact.new_nodes)[1] == idx
-        _, typ, new_node = popfirst!(compact.new_nodes)
-        new_idx = length(compact.ir.stmts) + length(compact.ir.new_nodes) - length(compact.new_nodes)
+    if !isempty(compact.new_nodes_perm) && compact.ir.new_nodes[Base.peek(compact.new_nodes_perm)][1] == idx
+        new_idx = popfirst!(compact.new_nodes_perm)
+        _, typ, new_node = compact.ir.new_nodes[new_idx]
+        new_idx += length(compact.ir.stmts)
         compact.result_types[old_result_idx] = typ
         result_idx = process_node!(compact, old_result_idx, new_node, new_idx, idx)
         (old_result_idx == result_idx) && return next(compact, (idx, result_idx))
         compact.result_idx = result_idx
-        if old_result_idx > last(bb.stmts)
-            compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, first(bb.stmts):old_result_idx)
-        end
         return (old_result_idx, compact.result[old_result_idx]), (compact.idx, active_bb, compact.result_idx)
     end
     # This will get overwritten in future iterations if
@@ -399,17 +425,12 @@ function Base.next(compact::IncrementalCompact, (idx, active_bb, old_result_idx)
             compact.result[old_result_idx] = nothing
             result_idx = old_result_idx + 1
         end
-    end
-    if old_result_idx > last(bb.stmts)
-        compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, first(bb.stmts):old_result_idx)
-    end
-    if idx == last(bb.stmts)
-        compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, first(bb.stmts):result_idx-1)
+        compact.ir.cfg.blocks[active_bb] = BasicBlock(bb, StmtRange(first(bb.stmts), result_idx-1))
         active_bb += 1
         if active_bb <= length(compact.ir.cfg.blocks)
             new_bb = compact.ir.cfg.blocks[active_bb]
             compact.ir.cfg.blocks[active_bb] = BasicBlock(new_bb,
-                result_idx:last(new_bb.stmts))
+                StmtRange(result_idx, last(new_bb.stmts)))
         end
     end
     (old_result_idx == result_idx) && return next(compact, (idx + 1, active_bb, result_idx))
@@ -419,7 +440,7 @@ function Base.next(compact::IncrementalCompact, (idx, active_bb, old_result_idx)
 end
 
 function maybe_erase_unused!(extra_worklist, compact, idx)
-    if stmt_effect_free(compact.result[idx])
+   if stmt_effect_free(compact.result[idx], compact.ir, compact.ir.mod)
         for ops in userefs(compact.result[idx])
             val = ops[]
             if isa(val, SSAValue)
@@ -459,7 +480,7 @@ function finish(compact::IncrementalCompact)
     resize!(compact.result_types, result_idx-1)
     bb = compact.ir.cfg.blocks[end]
     compact.ir.cfg.blocks[end] = BasicBlock(bb,
-                first(bb.stmts):result_idx-1)
+                StmtRange(first(bb.stmts), result_idx-1))
     # Perform simple DCE for unused values
     extra_worklist = Int[]
     for (idx, nused) in enumerate(compact.used_ssas)
@@ -470,7 +491,7 @@ function finish(compact::IncrementalCompact)
     while !isempty(extra_worklist)
         maybe_erase_unused!(extra_worklist, compact, pop!(extra_worklist))
     end
-    IRCode(compact.result, compact.result_types, compact.ir.cfg, Any[])
+    IRCode(compact.result, compact.result_types, compact.ir.cfg, Any[], compact.ir.mod)
 end
 
 function compact!(code::IRCode)

@@ -8,7 +8,9 @@ function scan_entry!(result, idx, stmt)
             push!(result[slot_id(stmt.args[1])].defs, idx)
         end
         scan_entry!(result, idx, stmt.args[2])
-    elseif isexpr(stmt, :call) || isexpr(stmt, :new)
+    elseif isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
+           isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) ||
+           isexpr(stmt, :foreigncall)
         for arg in stmt.args
             (isa(arg, SlotNumber) || isa(arg, TypedSlot)) || continue
             push!(result[slot_id(arg)].uses, idx)
@@ -71,25 +73,51 @@ struct UndefToken
 end
 const undef_token = UndefToken()
 
-function construct_ssa!(ci, cfg, domtree, defuse)
+function new_to_regular(stmt)
+    if isa(stmt, NewSSAValue)
+        return SSAValue(stmt.id)
+    end
+    urs = userefs(stmt)
+    for op in urs
+        val = op[]
+        if isa(val, NewSSAValue)
+            op[] = SSAValue(val.id)
+        end
+    end
+    urs[]
+end
+
+function construct_ssa!(ci, mod, cfg, domtree, defuse)
     left = Int[]
     defuse_blocks = lift_defuse(cfg, defuse)
     phi_slots = [Vector{Int}() for _ = 1:length(cfg.blocks)]
     phi_nodes = [Vector{Pair{Int,PhiNode}}() for _ = 1:length(cfg.blocks)]
     phi_ssas = SSAValue[]
+    # Remove `nothing`s at the end, we don't handle them well
+    # (we expect the last instruction to be a terminator)
+    for i = length(ci.code):-1:1
+        if ci.code[i] !== nothing
+            resize!(ci.code, i)
+            break
+        end
+    end
     code = Any[nothing for _ = 1:length(ci.code)]
-    ir = IRCode(code, cfg)
+    ir = IRCode(code, cfg, mod)
     for (idx, slot) in enumerate(defuse)
         # No uses => no need for phi nodes
         isempty(slot.uses) && continue
         if length(slot.defs) == 1
             if slot.defs[] == 0
                 typ = ci.slottypes[idx]
+                ssaval = Argument(idx)
+            elseif isa(ci.code[slot.defs[]], NewvarNode)
+                typ = Undef
+                ssaval = undef_token
             else
                 val = ci.code[slot.defs[]].args[2]
                 typ = typ_for_val(val, ci)
+                ssaval = make_ssa!(ci, slot.defs[], idx, typ)
             end
-            ssaval = make_ssa!(ci, slot.defs[], idx, typ)
             fixup_uses!(ci, slot.uses, idx, ssaval)
             continue
         end
@@ -113,6 +141,11 @@ function construct_ssa!(ci, cfg, domtree, defuse)
             ssaval, node = phi_nodes[item][idx]
             push!(node.edges, pred)
             incoming_val = incoming_vals[slot]
+            if incoming_val == SSAValue(-1)
+                # Optimistically omit this path.
+                # Liveness analysis would probably have prevented us from inserting this phi node
+                continue
+            end
             if incoming_val == undef_token
                 resize!(node.values, length(node.values)+1)
             else
@@ -122,7 +155,7 @@ function construct_ssa!(ci, cfg, domtree, defuse)
             new_node_id = ssaval - length(ir.stmts)
             old_insert, old_typ, _ = ir.new_nodes[new_node_id]
             ir.new_nodes[new_node_id] = (old_insert, Union{old_typ, typ}, node)
-            incoming_vals[slot] = SSAValue(ssaval)
+            incoming_vals[slot] = NewSSAValue(ssaval)
         end
         (item in visited) && continue
         push!(visited, item)
@@ -153,14 +186,22 @@ function construct_ssa!(ci, cfg, domtree, defuse)
     end
     # Convert into IRCode form
     ssavalmap = fill(SSAValue(-1), length(ci.ssavaluetypes)+1)
-    types = Type[Any for _ = 1:(length(code)+length(ir.new_nodes))]
+    types = Any[Any for _ = 1:(length(code)+length(ir.new_nodes))]
     # Detect statement positions for assignments and construct array
     for (idx, stmt) in enumerate(ci.code)
         if isexpr(stmt, :(=)) && isa(stmt.args[1], SSAValue)
             ssavalmap[stmt.args[1].id + 1] = SSAValue(idx)
             types[idx] = ci.ssavaluetypes[stmt.args[1].id + 1]
-            code[idx] = stmt.args[2]
-        # Convert GotoNode/GotoIfNot to BB addressing
+            stmt = stmt.args[2]
+            if isa(stmt, PhiNode)
+                edges = map(stmt.edges) do edge
+                    block_for_inst(cfg, edge)
+                end
+                code[idx] = PhiNode(convert(Vector{Any}, edges), stmt.values)
+            else
+                code[idx] = stmt
+            end
+        # Convert GotoNode/GotoIfNot/PhiNode to BB addressing
         elseif isa(stmt, GotoNode)
             code[idx] = GotoNode(block_for_inst(cfg, stmt.label))
         elseif isa(stmt, GotoIfNot)
@@ -170,7 +211,7 @@ function construct_ssa!(ci, cfg, domtree, defuse)
         end
     end
     # Renumber SSA values
-    code = map(stmt->renumber_ssa!(stmt, ssavalmap), code)
-    new_nodes = map(((pt,typ,stmt),)->(pt, typ, renumber_ssa!(stmt, ssavalmap)), ir.new_nodes)
-    IRCode(code, types, cfg, new_nodes)
+    code = map(stmt->new_to_regular(renumber_ssa!(stmt, ssavalmap)), code)
+    new_nodes = map(((pt,typ,stmt),)->(pt, typ, new_to_regular(renumber_ssa!(stmt, ssavalmap))), ir.new_nodes)
+    IRCode(code, types, cfg, new_nodes, mod)
 end

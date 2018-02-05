@@ -4,16 +4,20 @@ struct Argument
     n::Int
 end
 
+#=
 struct PhiNode
     edges::Vector{Int}
     values::Vector{Any}
 end
-PhiNode() = PhiNode(Int[], Any[])
+=#
+Core.PhiNode() = Core.PhiNode(Any[], Any[])
 
+#=
 struct PiNode
     val::Any
     typ::Type
 end
+=#
 
 #Maybe:
 #struct LabelNode
@@ -65,12 +69,17 @@ function compute_basic_blocks(stmts::Vector{Any})
         end
     end
     bb_starts = sort(collect(jump_dests))
-    push!(bb_starts, length(stmts) + 1)
+    for i = length(stmts):-1:1
+        if stmts[i] != nothing
+            push!(bb_starts, i+1)
+            break
+        end
+    end
     # Compute ranges
     basic_block_index = Int[]
     blocks = map(zip(bb_starts, Iterators.drop(bb_starts, 1))) do (first, last)
         push!(basic_block_index, first)
-        BasicBlock(first:(last-1))
+        BasicBlock(StmtRange(first, last-1))
     end
     popfirst!(basic_block_index)
     # Compute successors/predecessors
@@ -87,8 +96,10 @@ function compute_basic_blocks(stmts::Vector{Any})
             push!(blocks[block′].preds, num)
             push!(b.succs, block′)
         elseif !isa(terminator, ReturnNode)
-            push!(blocks[num+1].preds, num)
-            push!(b.succs, num+1)
+            if num + 1 <= length(blocks)
+                push!(blocks[num+1].preds, num)
+                push!(b.succs, num+1)
+            end
         end
     end
     CFG(blocks, basic_block_index)
@@ -236,9 +247,10 @@ function fixup_use!(stmt, slot, ssa)
     if isa(stmt, GotoIfNot)
         return GotoIfNot{Any}(fixup_use!(stmt.cond, slot, ssa), stmt.dest)
     elseif isa(stmt, ReturnNode)
-        return ReturnNode{Any}(fixup_use!(stmt.val))
+        return ReturnNode{Any}(fixup_use!(stmt.val, slot, ssa))
     end
-    if isexpr(stmt, :call) || isexpr(stmt, :new)
+    if isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
+       isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) || isexpr(stmt, :foreigncall)
         for i = 1:length(stmt.args)
             stmt.args[i] = fixup_use!(stmt.args[i], slot, ssa)
         end
@@ -264,7 +276,8 @@ function rename_uses!(stmt, renames)
     elseif isa(stmt, ReturnNode)
         return ReturnNode{Any}(rename_uses!(stmt.val, renames))
     end
-    if isexpr(stmt, :call) || isexpr(stmt, :new)
+    if isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
+       isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) || isexpr(stmt, :foreigncall)
         for i = 1:length(stmt.args)
             stmt.args[i] = rename_uses!(stmt.args[i], renames)
         end
@@ -286,6 +299,7 @@ function typ_for_val(val, ci)
     isa(val, Expr) && return val.typ
     isa(val, GlobalRef) && return typeof(getfield(val.mod, val.name))
     isa(val, SSAValue) && return ci.ssavaluetypes[val.id+1]
+    isa(val, NewSSAValue) && return Any # For now
     return typeof(val)
 end
 
@@ -296,11 +310,10 @@ function is_call(stmt, sym)
     return true
 end
 
-function stmt_effect_free(stmt)
-    isa(stmt, PiNode) && return true
-    isa(stmt, PhiNode) && return true
-    isexpr(stmt, :new) && return true
-    return is_call(stmt, :tuple) || is_call(stmt, :getfield)
+function stmt_effect_free(stmt, src, mod)
+    isa(stmt, Union{PiNode, PhiNode}) && return true
+    isa(stmt, Union{ReturnNode, PhiNode, GotoNode, GotoIfNot}) && return false
+    NI.statement_effect_free(stmt, src, mod)
 end
 
 function get_def(ir::IRCode, val::SSAValue)
@@ -341,8 +354,8 @@ function predicate_insertion_pass!(ir::IRCode, domtree)
         isdefined(typeof(cmp), :instance) || continue
         true_type = typeof(cmp)
         false_type = Core.Compiler.typesubtract(ir.types[val.id], typeof(cmp))
-        true_block = block_for_inst(cfg, idx + 1)
-        false_block = block_for_inst(cfg, stmt.dest)
+        true_block = block_for_inst(cfg, idx) + 1
+        false_block = stmt.dest
         true_val = insert_node!(ir, first_insert_for_bb(ir.stmts, cfg, true_block), true_type, PiNode(val, true_type))
         false_val = insert_node!(ir, first_insert_for_bb(ir.stmts, cfg, false_block), false_type, PiNode(val, false_type))
         annotate_pred!(ir, cfg, domtree, true_block, val, true_val)
@@ -366,17 +379,24 @@ function get_val_if_type_cmp(def)
     return (val, cmp)
 end
 
-function run_passes(ci::CodeInfo, nargs::Int)
+function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
+    @show ci.code
     ci.code = map(normalize, ci.code)
     cfg = compute_basic_blocks(ci.code)
+    @show cfg
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
-    ir = construct_ssa!(ci, cfg, domtree, defuse_insts)
+    ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
+    @show ("construct", ir)
     ir = compact!(ir)
     ir = predicate_insertion_pass!(ir, domtree)
+    @show ("post_pred", ir)
+    ir = compact!(ir)
     ir = getfield_elim_pass!(ir)
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
+    @show ("final_compact", ir)
+    ir = compact!(ir)
     ir
 end
 

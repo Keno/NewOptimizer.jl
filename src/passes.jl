@@ -28,8 +28,8 @@ function getfield_elim_pass!(ir::IRCode)
                     push!(phi_locs, (pred, defidx))
                     defidx = val.id
                     def = compact[defidx]
+                    continue
                 end
-                continue
             end
             break
         end
