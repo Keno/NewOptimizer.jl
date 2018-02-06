@@ -148,6 +148,14 @@ function ssamap(f, stmt)
     urs[]
 end
 
+function foreachssa(f, stmt)
+    for op in userefs(stmt)
+        val = op[]
+        if isa(val, SSAValue)
+            f(val)
+        end
+    end
+end
 
 function print_node(io::IO, idx, stmt, used, maxsize; color = true, print_typ=true)
     if idx in used
@@ -491,7 +499,8 @@ function finish(compact::IncrementalCompact)
     while !isempty(extra_worklist)
         maybe_erase_unused!(extra_worklist, compact, pop!(extra_worklist))
     end
-    IRCode(compact.result, compact.result_types, compact.ir.cfg, Any[], compact.ir.mod)
+    cfg = CFG(compact.ir.cfg.blocks, Int[first(bb.stmts) for bb in compact.ir.cfg.blocks[2:end]])
+    IRCode(compact.result, compact.result_types, cfg, Any[], compact.ir.mod)
 end
 
 function compact!(code::IRCode)
@@ -499,4 +508,21 @@ function compact!(code::IRCode)
     # Just run through the iterator without any processing
     foreach(_->nothing, compact)
     return finish(compact)
+end
+
+struct BBIdxStmt
+    ir::IRCode
+end
+
+bbidxstmt(ir) = BBIdxStmt(ir)
+
+Base.start(x::BBIdxStmt) = (1,1)
+Base.done(x::BBIdxStmt, (idx, bb)) = idx > length(x.ir.stmts)
+function Base.next(x::BBIdxStmt, (idx, bb))
+    active_bb = x.ir.cfg.blocks[bb]
+    next_bb = bb
+    if idx == last(active_bb.stmts)
+        next_bb += 1
+    end
+    return (bb, idx, x.ir.stmts[idx]), (idx + 1, next_bb)
 end
