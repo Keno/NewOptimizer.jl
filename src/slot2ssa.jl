@@ -87,20 +87,25 @@ function new_to_regular(stmt)
     urs[]
 end
 
+# Remove `nothing`s at the end, we don't handle them well
+# (we expect the last instruction to be a terminator)
+function strip_trailing_junk(code)
+     for i = length(code):-1:1
+         if code[i] !== nothing && !isexpr(code[i], :meta) &&
+            !isa(code[i], LineNumberNode) && !isexpr(code[i], :line)
+             resize!(code, i)
+             break
+         end
+     end
+     return code
+end
+
 function construct_ssa!(ci, mod, cfg, domtree, defuse)
     left = Int[]
     defuse_blocks = lift_defuse(cfg, defuse)
     phi_slots = [Vector{Int}() for _ = 1:length(cfg.blocks)]
     phi_nodes = [Vector{Pair{Int,PhiNode}}() for _ = 1:length(cfg.blocks)]
     phi_ssas = SSAValue[]
-    # Remove `nothing`s at the end, we don't handle them well
-    # (we expect the last instruction to be a terminator)
-    for i = length(ci.code):-1:1
-        if ci.code[i] !== nothing
-            resize!(ci.code, i)
-            break
-        end
-    end
     code = Any[nothing for _ = 1:length(ci.code)]
     ir = IRCode(code, cfg, mod)
     for (idx, slot) in enumerate(defuse)

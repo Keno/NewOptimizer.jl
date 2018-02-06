@@ -382,6 +382,7 @@ end
 function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     @show ci.code
     ci.code = map(normalize, ci.code)
+    ci.code = strip_trailing_junk(ci.code)
     cfg = compute_basic_blocks(ci.code)
     @show cfg
     defuse_insts = scan_slot_def_use(nargs, ci)
