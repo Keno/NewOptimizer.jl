@@ -76,6 +76,7 @@ function new_to_regular(stmt)
         return SSAValue(stmt.id)
     end
     urs = userefs(stmt)
+    urs === () && return stmt
     for op in urs
         val = op[]
         if isa(val, NewSSAValue)
@@ -93,6 +94,7 @@ function fixup_use!(stmt, slot, ssa)
         return stmt
     end
     urs = userefs(stmt)
+    urs === () && return stmt
     for op in urs
         val = op[]
         if isa(val, Union{SlotNumber, TypedSlot}) && slot_id(val) == slot
@@ -115,6 +117,7 @@ function rename_uses!(stmt, renames)
         return stmt
     end
     urs = userefs(stmt)
+    urs === () && return stmt
     for op in urs
         val = op[]
         if isa(val, Union{SlotNumber, TypedSlot})
@@ -158,7 +161,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             else
                 val = ci.code[slot.defs[]].args[2]
                 typ = typ_for_val(val, ci)
-                ssaval = make_ssa!(ci, slot.defs[], idx, typ)
+                ssaval = SSAValue(make_ssa!(ci, slot.defs[], idx, typ))
             end
             fixup_uses!(ci, slot.uses, idx, ssaval)
             continue

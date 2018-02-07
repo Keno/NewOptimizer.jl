@@ -1,5 +1,6 @@
 function ssaargmap(f, stmt)
     urs = userefs(stmt)
+    urs === () && return stmt
     for op in urs
         val = op[]
         if isa(val, Union{SSAValue, Argument})

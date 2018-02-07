@@ -252,36 +252,30 @@ function get_val_if_type_cmp(def)
 end
 
 function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
-    @show ci.code
+    ccall(:jl_, Cvoid, (Any,), ci.code)
     ci.code = map(normalize, ci.code)
     ci.code = strip_trailing_junk(ci.code)
     cfg = compute_basic_blocks(ci.code)
-    @show cfg
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
-    @show ("construct", ir)
     ir = compact!(ir)
-    @show ("pre_verify", ir)
     verify_ir(ir)
     ir = predicate_insertion_pass!(ir, domtree)
-    @show ("post_pred", ir)
     ir = compact!(ir)
     ir = getfield_elim_pass!(ir)
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
-    @show ("final_compact", ir)
     ir = compact!(ir)
+    @show ("final", ir)
     ir
 end
 
 function construct_ssa(f, args, mod::Module=Core.Main)
     ci = NI.code_typed(f, args)[1].first
-    @show ci.code
     ci.code = map(normalize, ci.code)
     ci.code = strip_trailing_junk(ci.code)
     cfg = compute_basic_blocks(ci.code)
-    @show cfg
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
@@ -299,39 +293,3 @@ function run_passes_ci(f, args)
     replace_code!(ci, ir, length(args.parameters))
     ci
 end
-
-# Test Case
-#=
-@noinline foo() = rand(Bool) ? 2 : nothing
-@inline baz(x) = x ? (foo(), 1) : nothing
-function bar(arg)
-   x = baz(arg)
-   x === nothing && return 0
-   a, b = x
-   a === nothing && return 1
-   return a
-end
-
-
-# Workspace
-ci = NI.code_typed(bar, Tuple{Bool})[1].first
-ci.code = map(normalize, ci.code)
-cfg = compute_basic_blocks(ci.code)
-defuse_insts = scan_slot_def_use(1, ci)
-domtree = construct_domtree(cfg)
-
-@show defuse_insts
-
-@show ci.code
-ir = construct_ssa!(ci, cfg, domtree, defuse_insts)
-@show ir
-ir = compact!(ir)
-@show ir
-predicate_insertion_pass!(ir, compute_basic_blocks(ir.stmts), domtree)
-@show ("predicate", ir)
-ir = compact!(ir)
-ir = getfield_elim_pass!(ir)
-ir = compact!(ir)
-ir = type_lift_pass!(ir)
-@show compact!(ir)
-=#

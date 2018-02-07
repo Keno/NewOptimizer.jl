@@ -39,7 +39,7 @@ struct IRCode
     stmts::Vector{Any}
     types::Vector{Any}
     cfg::CFG
-    new_nodes::Vector{Tuple{Int, Type, Any}}
+    new_nodes::Vector{Tuple{Int, Any, Any}}
     mod::Module
 end
 IRCode(stmts, cfg, mod) = IRCode(stmts, Any[], cfg, Tuple{Int, Type, Any}[], mod)
@@ -70,8 +70,7 @@ end
 
 function Base.getindex(x::UseRef)
     stmt = x.urs.stmt
-    if isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
-       isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) || isexpr(stmt, :foreigncall)
+    if isa(stmt, Expr) && is_relevant_expr(stmt)
         x.use > length(stmt.args) && return OOBToken()
         stmt.args[x.use]
     elseif isa(stmt, GotoIfNot)
@@ -89,11 +88,15 @@ function Base.getindex(x::UseRef)
     end
 end
 
+function is_relevant_expr(e::Expr)
+    isexpr(e, :call) || isexpr(e, :invoke) ||
+    isexpr(e, :new) || isexpr(e, :gc_preserve_begin) || isexpr(e, :gc_preserve_end) ||
+    isexpr(e, :foreigncall)
+end
+
 function Base.setindex!(x::UseRef, v)
     stmt = x.urs.stmt
-    if isexpr(stmt, :call) || isexpr(stmt, :invoke) ||
-       isexpr(stmt, :new) || isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) ||
-       isexpr(stmt, :foreigncall)
+    if isa(stmt, Expr) && is_relevant_expr(stmt)
         x.use > length(stmt.args) && throw(BoundsError())
         stmt.args[x.use] = v
     elseif isa(stmt, GotoIfNot)
@@ -114,7 +117,14 @@ function Base.setindex!(x::UseRef, v)
     end
 end
 
-userefs(x) = UseRefIterator(x)
+function userefs(x)
+    if (isa(x, Expr) && is_relevant_expr(x)) ||
+        isa(x, Union{GotoIfNot, ReturnNode, PiNode, PhiNode})
+        UseRefIterator(x)
+    else
+        ()
+    end
+end
 
 Base.start(it::UseRefIterator) = 1
 function Base.next(it::UseRefIterator, use)
@@ -144,6 +154,7 @@ end
 
 function ssamap(f, stmt)
     urs = userefs(stmt)
+    urs === () && return stmt
     for op in urs
         val = op[]
         if isa(val, SSAValue)
@@ -449,6 +460,12 @@ function Base.next(compact::IncrementalCompact, (idx, active_bb, old_result_idx)
     (old_result_idx == result_idx) && return next(compact, (idx + 1, active_bb, result_idx))
     compact.idx = idx + 1
     compact.result_idx = result_idx
+    if !isassigned(compact.result, old_result_idx)
+        ccall(:jl_, Cvoid, (Any,), compact.ir.stmts)
+        ccall(:jl_, Cvoid, (Any,), (compact.ir.stmts[idx], old_result_idx, result_idx, idx))
+        ccall(:jl_, Cvoid, (Any,), compact.result)
+        @assert false
+    end
     return (old_result_idx, compact.result[old_result_idx]), (compact.idx, active_bb, compact.result_idx)
 end
 
