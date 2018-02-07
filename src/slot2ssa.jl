@@ -3,24 +3,22 @@ function scan_entry!(result, idx, stmt)
     # of liveness analysis (i.e. they kill use chains)
     if isa(stmt, NewvarNode)
         push!(result[slot_id(stmt.slot)].defs, idx)
+        return
     elseif isexpr(stmt, :(=))
         if isa(stmt.args[1], SlotNumber)
             push!(result[slot_id(stmt.args[1])].defs, idx)
         end
-        scan_entry!(result, idx, stmt.args[2])
-    elseif isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
-           isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) ||
-           isexpr(stmt, :foreigncall)
-        for arg in stmt.args
-            (isa(arg, SlotNumber) || isa(arg, TypedSlot)) || continue
-            push!(result[slot_id(arg)].uses, idx)
-        end
-    elseif isa(stmt, GotoIfNot)
-        scan_entry!(result, idx, stmt.cond)
-    elseif isa(stmt, ReturnNode)
-        scan_entry!(result, idx, stmt.val)
-    elseif isa(stmt, SlotNumber) || isa(stmt, TypedSlot)
+        stmt = stmt.args[2]
+    end
+    if isa(stmt, Union{SlotNumber, TypedSlot})
         push!(result[slot_id(stmt)].uses, idx)
+        return
+    end
+    for op in userefs(stmt)
+        val = op[]
+        if isa(val, Union{SlotNumber, TypedSlot})
+            push!(result[slot_id(val)].uses, idx)
+        end
     end
 end
 
@@ -87,6 +85,45 @@ function new_to_regular(stmt)
     urs[]
 end
 
+
+function fixup_use!(stmt, slot, ssa)
+    (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && slot_id(stmt) == slot && return ssa
+    if isexpr(stmt, :(=))
+        stmt.args[2] = fixup_use!(stmt.args[2], slot, ssa)
+        return stmt
+    end
+    urs = userefs(stmt)
+    for op in urs
+        val = op[]
+        if isa(val, Union{SlotNumber, TypedSlot}) && slot_id(val) == slot
+            op[] = ssa
+        end
+    end
+    urs[]
+end
+
+function fixup_uses!(ci, uses, slot, ssa)
+    for use in uses
+        ci.code[use] = fixup_use!(ci.code[use], slot, ssa)
+    end
+end
+
+function rename_uses!(stmt, renames)
+    (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && return renames[slot_id(stmt)]
+    if isexpr(stmt, :(=))
+        stmt.args[2] = rename_uses!(stmt.args[2], renames)
+        return stmt
+    end
+    urs = userefs(stmt)
+    for op in urs
+        val = op[]
+        if isa(val, Union{SlotNumber, TypedSlot})
+            op[] = renames[slot_id(val)]
+        end
+    end
+    urs[]
+end
+
 # Remove `nothing`s at the end, we don't handle them well
 # (we expect the last instruction to be a terminator)
 function strip_trailing_junk(code)
@@ -137,7 +174,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
         push!(left, idx)
     end
     # Perform SSA renaming
-    worklist = Any[(1, 0, Any[SSAValue(-1) for _ = 1:length(ci.slotnames)])]
+    worklist = Any[(1, 0, Any[((0 in defuse[x].defs) ? Argument(x) : SSAValue(-1)) for x = 1:length(ci.slotnames)])]
     visited = Set{Int}()
     while !isempty(worklist)
         (item, pred, incoming_vals) = pop!(worklist)
@@ -159,7 +196,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             typ = incoming_val == undef_token ? Undef : typ_for_val(incoming_val, ci)
             new_node_id = ssaval - length(ir.stmts)
             old_insert, old_typ, _ = ir.new_nodes[new_node_id]
-            ir.new_nodes[new_node_id] = (old_insert, Union{old_typ, typ}, node)
+            ir.new_nodes[new_node_id] = (old_insert, NI.tmerge(old_typ, typ), node)
             incoming_vals[slot] = NewSSAValue(ssaval)
         end
         (item in visited) && continue

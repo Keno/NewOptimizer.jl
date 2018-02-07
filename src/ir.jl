@@ -29,6 +29,11 @@ struct CFG
     index::Vector{Int}
 end
 
+function Base.show(io::IO, cfg::CFG)
+    foreach(pairs(cfg.blocks)) do (idx, block)
+        println("$idx\t=>\t", join(block.succs, ", "))
+    end
+end
 
 struct IRCode
     stmts::Vector{Any}
@@ -363,7 +368,7 @@ end
 function process_node!(result, result_idx, ssa_rename, late_fixup, used_ssas, stmt, idx, processed_idx, keep_meta)
     ssa_rename[idx] = SSAValue(result_idx)
     if stmt === nothing
-        # eliminate this node
+        ssa_rename[idx] = stmt
     elseif !keep_meta && (isexpr(stmt, :meta) || isa(stmt, LineNumberNode))
         # eliminate this node
     elseif isa(stmt, GotoNode)

@@ -158,54 +158,6 @@ function idf(cfg, defuse, domtree, slot)
     phiblocks
 end
 
-function fixup_use!(stmt, slot, ssa)
-    ((isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && slot_id(stmt) == slot) && return isa(ssa, Int) ? SSAValue(ssa) : ssa
-    if isexpr(stmt, :(=))
-        stmt.args[2] = fixup_use!(stmt.args[2], slot, ssa)
-        return stmt
-    end
-    if isa(stmt, GotoIfNot)
-        return GotoIfNot{Any}(fixup_use!(stmt.cond, slot, ssa), stmt.dest)
-    elseif isa(stmt, ReturnNode)
-        return ReturnNode{Any}(fixup_use!(stmt.val, slot, ssa))
-    end
-    if isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
-       isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) || isexpr(stmt, :foreigncall)
-        for i = 1:length(stmt.args)
-            stmt.args[i] = fixup_use!(stmt.args[i], slot, ssa)
-        end
-        return stmt
-    end
-    return stmt
-end
-
-function fixup_uses!(ci, uses, slot, ssa)
-    for use in uses
-        ci.code[use] = fixup_use!(ci.code[use], slot, ssa)
-    end
-end
-
-function rename_uses!(stmt, renames)
-    (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && return renames[slot_id(stmt)]
-    if isexpr(stmt, :(=))
-        stmt.args[2] = rename_uses!(stmt.args[2], renames)
-        return stmt
-    end
-    if isa(stmt, GotoIfNot)
-        return GotoIfNot{Any}(rename_uses!(stmt.cond, renames), stmt.dest)
-    elseif isa(stmt, ReturnNode)
-        return ReturnNode{Any}(rename_uses!(stmt.val, renames))
-    end
-    if isexpr(stmt, :call) || isexpr(stmt, :invoke) || isexpr(stmt, :new) ||
-       isexpr(stmt, :gc_preserve_begin) || isexpr(stmt, :gc_preserve_end) || isexpr(stmt, :foreigncall)
-        for i = 1:length(stmt.args)
-            stmt.args[i] = rename_uses!(stmt.args[i], renames)
-        end
-        return stmt
-    end
-    return stmt
-end
-
 function first_insert_for_bb(code, cfg, block)
     for idx in cfg.blocks[block].stmts
         stmt = code[idx]
@@ -310,6 +262,7 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
     @show ("construct", ir)
     ir = compact!(ir)
+    @show ("pre_verify", ir)
     verify_ir(ir)
     ir = predicate_insertion_pass!(ir, domtree)
     @show ("post_pred", ir)
@@ -319,6 +272,19 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     ir = type_lift_pass!(ir)
     @show ("final_compact", ir)
     ir = compact!(ir)
+    ir
+end
+
+function construct_ssa(f, args, mod::Module=Core.Main)
+    ci = NI.code_typed(f, args)[1].first
+    @show ci.code
+    ci.code = map(normalize, ci.code)
+    ci.code = strip_trailing_junk(ci.code)
+    cfg = compute_basic_blocks(ci.code)
+    @show cfg
+    defuse_insts = scan_slot_def_use(nargs, ci)
+    domtree = construct_domtree(cfg)
+    ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
     ir
 end
 
