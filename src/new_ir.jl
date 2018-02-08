@@ -255,11 +255,13 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     ccall(:jl_, Cvoid, (Any,), ci.code)
     ci.code = map(normalize, ci.code)
     ci.code = strip_trailing_junk(ci.code)
+    @show ci.code
     cfg = compute_basic_blocks(ci.code)
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
     ir = compact!(ir)
+    @show ("pre_verify", ir)
     verify_ir(ir)
     ir = predicate_insertion_pass!(ir, domtree)
     ir = compact!(ir)
@@ -267,7 +269,6 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
     ir = compact!(ir)
-    @show ("final", ir)
     ir
 end
 

@@ -25,9 +25,13 @@ function getfield_elim_pass!(ir::IRCode)
                 # For now, only look at unique predecessors
                 if length(possible_predecessors) == 1
                     pred, val = possible_predecessors[1]
-                    push!(phi_locs, (pred, defidx))
-                    defidx = val.id
-                    def = compact[defidx]
+                    if isa(val, SSAValue)
+                        push!(phi_locs, (pred, defidx))
+                        defidx = val.id
+                        def = compact[defidx]
+                    else
+                        def = val
+                    end
                     continue
                 end
             end

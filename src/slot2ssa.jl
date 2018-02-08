@@ -184,13 +184,13 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
         # Insert phi nodes if necessary
         for (idx, slot) in enumerate(phi_slots[item])
             ssaval, node = phi_nodes[item][idx]
-            push!(node.edges, pred)
             incoming_val = incoming_vals[slot]
             if incoming_val == SSAValue(-1)
                 # Optimistically omit this path.
                 # Liveness analysis would probably have prevented us from inserting this phi node
                 continue
             end
+            push!(node.edges, pred)
             if incoming_val == undef_token
                 resize!(node.values, length(node.values)+1)
             else

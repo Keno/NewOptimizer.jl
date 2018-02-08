@@ -22,6 +22,7 @@ function verify_ir(ir::IRCode)
     domtree = construct_domtree(ir.cfg)
     for (bb, idx, stmt) in bbidxstmt(ir)
         if isa(stmt, PhiNode)
+            @assert length(stmt.edges) == length(stmt.values)
             for i = 1:length(stmt.edges)
                 isassigned(stmt.values, i) || continue
                 val = stmt.values[i]
