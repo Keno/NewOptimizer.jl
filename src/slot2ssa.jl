@@ -136,17 +136,36 @@ function rename_uses!(ir, idx, stmt, renames)
     urs[]
 end
 
-# Remove `nothing`s at the end, we don't handle them well
-# (we expect the last instruction to be a terminator)
 function strip_trailing_junk(code)
-     for i = length(code):-1:1
-         if code[i] !== nothing && !isexpr(code[i], :meta) &&
+    # Remove `nothing`s at the end, we don't handle them well
+    # (we expect the last instruction to be a terminator)
+    for i = length(code):-1:1
+        if code[i] !== nothing && !isexpr(code[i], :meta) &&
             !isa(code[i], LineNumberNode) && !isexpr(code[i], :line)
-             resize!(code, i)
-             break
-         end
-     end
-     return code
+            resize!(code, i)
+            break
+        end
+    end
+    # If the last instruction is not a terminator, add one. This can
+    # happen for implicit return on dead branches.
+    if !isexpr(code[end], :return) && !isexpr(code[end], :gotoifnot) && !isa(code, GotoNode) &&
+            !isa(code[end], ReturnNode) && !isa(code[end], GotoIfNot)
+        push!(code, ReturnNode{Any}())
+    end
+    return code
+end
+
+struct DelayedTyp
+    phi::NewSSAValue
+end
+
+function typ_for_val(val, ir, ci)
+    isa(val, Expr) && return val.typ
+    isa(val, GlobalRef) && return typeof(getfield(val.mod, val.name))
+    isa(val, SSAValue) && return ci.ssavaluetypes[val.id+1]
+    isa(val, Argument) && return ci.slottypes[val.n]
+    isa(val, NewSSAValue) && return DelayedTyp(val)
+    return typeof(val)
 end
 
 function construct_ssa!(ci, mod, cfg, domtree, defuse)
@@ -169,7 +188,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
                 ssaval = undef_token
             else
                 val = ci.code[slot.defs[]].args[2]
-                typ = typ_for_val(val, ci)
+                typ = typ_for_val(val, ir, ci)
                 ssaval = SSAValue(make_ssa!(ci, slot.defs[], idx, typ))
             end
             fixup_uses!(ir, ci, slot.uses, idx, ssaval)
@@ -188,6 +207,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
     # Perform SSA renaming
     worklist = Any[(1, 0, Any[((0 in defuse[x].defs) ? Argument(x) : SSAValue(-1)) for x = 1:length(ci.slotnames)])]
     visited = Set{Int}()
+    type_refine_phi = Set{Int}()
     while !isempty(worklist)
         (item, pred, incoming_vals) = pop!(worklist)
         # Insert phi nodes if necessary
@@ -205,10 +225,17 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             else
                 push!(node.values, incoming_val)
             end
-            typ = incoming_val == undef_token ? Undef : typ_for_val(incoming_val, ci)
+            if isa(incoming_val, NewSSAValue)
+                push!(type_refine_phi, ssaval)
+            end
+            typ = incoming_val == undef_token ? Undef : typ_for_val(incoming_val, ir, ci)
             new_node_id = ssaval - length(ir.stmts)
             old_insert, old_typ, _ = ir.new_nodes[new_node_id]
-            ir.new_nodes[new_node_id] = (old_insert, NI.tmerge(old_typ, typ), node)
+            if isa(typ, DelayedTyp)
+                push!(type_refine_phi, ssaval)
+            end
+            ir.new_nodes[new_node_id] = (old_insert,
+                isa(typ, DelayedTyp) ? Union{} : NI.tmerge(old_typ, typ), node)
             incoming_vals[slot] = NewSSAValue(ssaval)
         end
         (item in visited) && continue
@@ -224,7 +251,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
                 if isexpr(stmt, :(=)) && isa(stmt.args[1], SlotNumber)
                     id = slot_id(stmt.args[1])
                     val = stmt.args[2]
-                    typ = typ_for_val(val, ci)
+                    typ = typ_for_val(val, ir, ci)
                     incoming_vals[id] = SSAValue(make_ssa!(ci, idx, id, typ))
                 end
             end
@@ -265,8 +292,39 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             code[idx] = stmt
         end
     end
+    # This is a bit awkward, because it basically duplicates what type
+    # inference does. Ideally, we'd just use this representation earlier
+    # to make sure phi nodes have accurate types
+    changed = true
+    while changed
+        changed = false
+        for phi in type_refine_phi
+            new_idx = phi - length(ir.stmts)
+            old_insert, old_typ, node = ir.new_nodes[new_idx]
+            new_typ = Union{}
+            for i = 1:length(node.values)
+                isassigned(node.values, i) || continue
+                typ = typ_for_val(node.values[i], ir, ci)
+                if isa(typ, DelayedTyp)
+                    typ = ir.new_nodes[typ.phi.id - length(ir.stmts)][2]
+                end
+                new_typ = NI.tmerge(new_typ, typ)
+            end
+            if old_typ != new_typ
+                ir.new_nodes[new_idx] = (old_insert, new_typ, node)
+                changed = true
+            end
+        end
+    end
+    types = map(types) do typ
+        isa(typ, DelayedTyp) ? ir.new_nodes[typ.phi.id - length(ir.stmts)][2] : typ
+    end
+    new_nodes = map(ir.new_nodes) do (pos, typ, node)
+        typ = isa(typ, DelayedTyp) ? ir.new_nodes[typ.phi.id - length(ir.stmts)][2] : typ
+        (pos, typ, node)
+    end
     # Renumber SSA values
     code = map(stmt->new_to_regular(renumber_ssa!(stmt, ssavalmap)), code)
-    new_nodes = map(((pt,typ,stmt),)->(pt, typ, new_to_regular(renumber_ssa!(stmt, ssavalmap))), ir.new_nodes)
+    new_nodes = map(((pt,typ,stmt),)->(pt, typ, new_to_regular(renumber_ssa!(stmt, ssavalmap))), new_nodes)
     IRCode(code, types, cfg, new_nodes, mod)
 end

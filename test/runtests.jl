@@ -55,3 +55,15 @@ end
 let ir = NewOptimizer.run_passes(loop, Tuple{})
     @test !any(expr->NewOptimizer.is_call(expr, :tuple), ir.stmts)
 end
+
+struct Wrapper{T}
+    x::T
+end
+
+@eval function foo(x::T) where {T}
+    $(Expr(:new, Wrapper, :x)).x
+end
+
+let ir = NewOptimizer.run_passes(foo, Tuple{Any})
+    @test !any(expr->NewOptimizer.is_call(expr, :getfield), ir.stmts)
+end

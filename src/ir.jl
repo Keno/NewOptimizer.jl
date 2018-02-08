@@ -77,6 +77,7 @@ function Base.getindex(x::UseRef)
         x.use == 1 || return OOBToken()
         return stmt.cond
     elseif isa(stmt, ReturnNode) || isa(stmt, PiNode)
+        isdefined(stmt, :val) || return OOBToken()
         x.use == 1 || return OOBToken()
         return stmt.val
     elseif isa(stmt, PhiNode)
@@ -201,8 +202,12 @@ function print_node(io::IO, idx, stmt, used, maxsize; color = true, print_typ=tr
         end
         print(io, ")")
     elseif isa(stmt, ReturnNode)
-        print(io, "return ")
-        print_ssa(io, stmt.val)
+        if !isdefined(stmt, :val)
+            print(io, "unreachable")
+        else
+            print(io, "return ")
+            print_ssa(io, stmt.val)
+        end
     elseif isa(stmt, GotoIfNot)
         print(io, "goto ", stmt.dest, " if not ")
         print_ssa(io, stmt.cond)

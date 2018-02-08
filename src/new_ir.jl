@@ -32,6 +32,8 @@ end
 
 struct ReturnNode{T}
     val::T
+    ReturnNode{T}(val::T) where {T} = new{T}(val)
+    ReturnNode{T}() where {T} = new{T}()
 end
 
 using Base.Meta
@@ -167,14 +169,6 @@ function first_insert_for_bb(code, cfg, block)
     end
 end
 
-function typ_for_val(val, ci)
-    isa(val, Expr) && return val.typ
-    isa(val, GlobalRef) && return typeof(getfield(val.mod, val.name))
-    isa(val, SSAValue) && return ci.ssavaluetypes[val.id+1]
-    isa(val, NewSSAValue) && return Any # For now
-    return typeof(val)
-end
-
 function is_call(stmt, sym)
     isexpr(stmt, :call) || return false
     isa(stmt.args[1], GlobalRef) || return false
@@ -225,7 +219,8 @@ function predicate_insertion_pass!(ir::IRCode, domtree)
         end
         isdefined(typeof(cmp), :instance) || continue
         true_type = typeof(cmp)
-        false_type = Core.Compiler.typesubtract(ir.types[val.id], typeof(cmp))
+        isa(ir.types[val.id], Type) || continue
+        false_type = Core.Compiler.typesubtract(ir.types[val.id], true_type)
         true_block = block_for_inst(cfg, idx) + 1
         false_block = stmt.dest
         true_val = insert_node!(ir, first_insert_for_bb(ir.stmts, cfg, true_block), true_type, PiNode(val, true_type))
@@ -252,14 +247,12 @@ function get_val_if_type_cmp(def)
 end
 
 function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
-    ccall(:jl_, Cvoid, (Any,), ci.code)
     ci.code = map(normalize, ci.code)
     ci.code = strip_trailing_junk(ci.code)
     cfg = compute_basic_blocks(ci.code)
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
-#    @show ("pre_compact", ir)
     ir = compact!(ir)
     @show ("pre_verify", ir)
     verify_ir(ir)

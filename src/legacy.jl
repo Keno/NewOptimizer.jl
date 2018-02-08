@@ -75,7 +75,12 @@ function replace_code!(ci::CodeInfo, code::IRCode, nargs)
             new_stmt = Expr(:gotoifnot, rename(stmt.cond), stmt.dest)
             push!(fixup, length(new_code)+1)
         elseif isa(stmt, ReturnNode)
-            new_stmt = Expr(:return, rename(stmt.val))
+            if isdefined(stmt, :val)
+                new_stmt = Expr(:return, rename(stmt.val))
+            else
+                # Unreachable, so no issue with this
+                new_stmt = nothing
+            end
         elseif isa(stmt, SSAValue)
             new_stmt = rename(stmt)
         elseif isa(stmt, PhiNode)

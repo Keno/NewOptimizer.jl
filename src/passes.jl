@@ -41,10 +41,14 @@ function getfield_elim_pass!(ir::IRCode)
             end
             break
         end
-        if is_call(def, :tuple)
+        if is_call(def, :tuple) && isa(field, Int) && 1 <= field < length(def.args)
             forwarded = def.args[1+field]
         elseif isexpr(def, :new)
             typ = def.typ
+            if isa(typ, UnionAll)
+                typ = Base.unwrap_unionall(typ)
+            end
+            isa(typ, DataType) || continue
             !typ.mutable || continue
             if isa(field, Symbol)
                 field = Base.fieldindex(typ, field, false)
