@@ -14,8 +14,12 @@ function getfield_elim_pass!(ir::IRCode)
         while true
             if isa(def, PiNode)
                 typeconstraint = typeintersect(typeconstraint, def.typ)
-                defidx = def.val.id
-                def = compact[defidx]
+                if isa(def.val, SSAValue)
+                    defidx = def.val.id
+                    def = compact[defidx]
+                else
+                    def = def.val
+                end
                 continue
             elseif isa(def, PhiNode)
                 possible_predecessors = collect(Iterators.filter(zip(def.edges, def.values)) do (edge, value)

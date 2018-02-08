@@ -86,11 +86,20 @@ function new_to_regular(stmt)
     urs[]
 end
 
+function fixup_slot!(ir, idx, stmt::Union{SlotNumber, TypedSlot}, ssa)
+    if isa(stmt, SlotNumber)
+        return ssa
+    elseif isa(stmt, TypedSlot)
+        return NewSSAValue(insert_node!(ir, idx, stmt.typ, PiNode(ssa, stmt.typ)).id)
+    end
+end
 
-function fixup_use!(stmt, slot, ssa)
-    (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && slot_id(stmt) == slot && return ssa
+function fixup_use!(ir, idx, stmt, slot, ssa)
+    if (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && slot_id(stmt) == slot
+        return fixup_slot!(ir, idx, stmt, ssa)
+    end
     if isexpr(stmt, :(=))
-        stmt.args[2] = fixup_use!(stmt.args[2], slot, ssa)
+        stmt.args[2] = fixup_use!(ir, idx, stmt.args[2], slot, ssa)
         return stmt
     end
     urs = userefs(stmt)
@@ -98,22 +107,22 @@ function fixup_use!(stmt, slot, ssa)
     for op in urs
         val = op[]
         if isa(val, Union{SlotNumber, TypedSlot}) && slot_id(val) == slot
-            op[] = ssa
+            op[] = fixup_slot!(ir, idx, val, ssa)
         end
     end
     urs[]
 end
 
-function fixup_uses!(ci, uses, slot, ssa)
+function fixup_uses!(ir, ci, uses, slot, ssa)
     for use in uses
-        ci.code[use] = fixup_use!(ci.code[use], slot, ssa)
+        ci.code[use] = fixup_use!(ir, use, ci.code[use], slot, ssa)
     end
 end
 
-function rename_uses!(stmt, renames)
-    (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && return renames[slot_id(stmt)]
+function rename_uses!(ir, idx, stmt, renames)
+    isa(stmt, Union{SlotNumber, TypedSlot}) && return fixup_slot!(ir, idx, stmt, renames[slot_id(stmt)])
     if isexpr(stmt, :(=))
-        stmt.args[2] = rename_uses!(stmt.args[2], renames)
+        stmt.args[2] = rename_uses!(ir, idx, stmt.args[2], renames)
         return stmt
     end
     urs = userefs(stmt)
@@ -121,7 +130,7 @@ function rename_uses!(stmt, renames)
     for op in urs
         val = op[]
         if isa(val, Union{SlotNumber, TypedSlot})
-            op[] = renames[slot_id(val)]
+            op[] = fixup_slot!(ir, idx, val, renames[slot_id(val)])
         end
     end
     urs[]
@@ -163,7 +172,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
                 typ = typ_for_val(val, ci)
                 ssaval = SSAValue(make_ssa!(ci, slot.defs[], idx, typ))
             end
-            fixup_uses!(ci, slot.uses, idx, ssaval)
+            fixup_uses!(ir, ci, slot.uses, idx, ssaval)
             continue
         end
         # TODO: Perform liveness here to eliminate dead phi nodes
@@ -206,17 +215,18 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
         push!(visited, item)
         for idx in cfg.blocks[item].stmts
             stmt = ci.code[idx]
-            # Rename any uses
-            ci.code[idx] = rename_uses!(stmt, incoming_vals)
-            # Record a store
-            if isexpr(stmt, :(=)) && isa(stmt.args[1], SlotNumber)
-                id = slot_id(stmt.args[1])
-                val = stmt.args[2]
-                typ = typ_for_val(val, ci)
-                incoming_vals[id] = SSAValue(make_ssa!(ci, idx, id, typ))
-            elseif isa(stmt, NewvarNode)
+            if isa(stmt, NewvarNode)
                 incoming_vals[slot_id(stmt.slot)] = undef_token
                 ci.code[idx] = nothing
+            else
+                ci.code[idx] = rename_uses!(ir, idx, stmt, incoming_vals)
+                # Record a store
+                if isexpr(stmt, :(=)) && isa(stmt.args[1], SlotNumber)
+                    id = slot_id(stmt.args[1])
+                    val = stmt.args[2]
+                    typ = typ_for_val(val, ci)
+                    incoming_vals[id] = SSAValue(make_ssa!(ci, idx, id, typ))
+                end
             end
         end
         for succ in cfg.blocks[item].succs

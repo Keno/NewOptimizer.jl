@@ -26,6 +26,17 @@ function verify_ir(ir::IRCode)
             for i = 1:length(stmt.edges)
                 isassigned(stmt.values, i) || continue
                 val = stmt.values[i]
+                phiT = ir.types[idx]
+                if isa(val, SSAValue)
+                    if !(NI.:⊑)(ir.types[val.id], phiT)
+                        @error """
+                            PhiNode $idx, has operand $(val.id), who's type is not a sub lattice element.
+                            PhiNode type was $phiT
+                            Value type was $(ir.types[val.id])
+                        """
+                        error()
+                    end
+                end
                 check_op(ir, domtree, val, stmt.edges[i], last(ir.cfg.blocks[stmt.edges[i]].stmts)+1)
             end
         else
