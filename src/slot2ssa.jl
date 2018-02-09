@@ -85,7 +85,7 @@ end
 function fixup_slot!(ir, ci, idx, slot, stmt::Union{SlotNumber, TypedSlot}, ssa)
     # We don't really have the information here to get rid of these.
     # We'll do so later
-    if !isa(ssa, Argument) && ((ci.slotflags[slot] & NI.SLOT_USEDUNDEF) != 0)
+    if !isa(ssa, Argument) && !(ssa === nothing) && ((ci.slotflags[slot] & NI.SLOT_USEDUNDEF) != 0)
         insert_node!(ir, idx, Any, Expr(:undefcheck, ci.slotnames[slot], ssa))
     end
     if isa(stmt, SlotNumber)
@@ -184,15 +184,20 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             if slot.defs[] == 0
                 typ = ci.slottypes[idx]
                 ssaval = Argument(idx)
+                fixup_uses!(ir, ci, slot.uses, idx, ssaval)
             elseif isa(ci.code[slot.defs[]], NewvarNode)
                 typ = NI.MaybeUndef(Union{})
-                ssaval = undef_token
+                ssaval = nothing
+                for use in slot.uses[]
+                    insert_node!(ir, use, Union{}, Expr(:throw_undef_if_not, ci.slotnames[idx], false))
+                end
+                fixup_uses!(ir, ci, slot.uses, idx, nothing)
             else
                 val = ci.code[slot.defs[]].args[2]
                 typ = typ_for_val(val, ir, ci)
                 ssaval = SSAValue(make_ssa!(ci, slot.defs[], idx, typ))
+                fixup_uses!(ir, ci, slot.uses, idx, ssaval)
             end
-            fixup_uses!(ir, ci, slot.uses, idx, ssaval)
             continue
         end
         # TODO: Perform liveness here to eliminate dead phi nodes
@@ -235,7 +240,6 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             if isa(typ, DelayedTyp)
                 push!(type_refine_phi, ssaval)
             end
-            @show (old_typ, typ)
             ir.new_nodes[new_node_id] = (old_insert,
                 isa(typ, DelayedTyp) ? Union{} : NI.tmerge(old_typ, typ), node)
             incoming_vals[slot] = NewSSAValue(ssaval)
