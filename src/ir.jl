@@ -92,7 +92,8 @@ end
 function is_relevant_expr(e::Expr)
     isexpr(e, :call) || isexpr(e, :invoke) ||
     isexpr(e, :new) || isexpr(e, :gc_preserve_begin) || isexpr(e, :gc_preserve_end) ||
-    isexpr(e, :foreigncall)
+    isexpr(e, :foreigncall) || isexpr(e, :isdefined) || isexpr(e, :undefcheck) ||
+    isexpr(e, :throw_undef_if_not)
 end
 
 function Base.setindex!(x::UseRef, v)

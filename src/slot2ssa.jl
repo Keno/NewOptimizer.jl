@@ -63,10 +63,6 @@ function make_ssa!(ci, idx, slot, typ)
     ssa
 end
 
-mutable struct Undef
-let unconstructable; end
-end
-
 struct UndefToken
 end
 const undef_token = UndefToken()
@@ -86,7 +82,12 @@ function new_to_regular(stmt)
     urs[]
 end
 
-function fixup_slot!(ir, idx, stmt::Union{SlotNumber, TypedSlot}, ssa)
+function fixup_slot!(ir, ci, idx, slot, stmt::Union{SlotNumber, TypedSlot}, ssa)
+    # We don't really have the information here to get rid of these.
+    # We'll do so later
+    if !isa(ssa, Argument) && ((ci.slotflags[slot] & NI.SLOT_USEDUNDEF) != 0)
+        insert_node!(ir, idx, Any, Expr(:undefcheck, ci.slotnames[slot], ssa))
+    end
     if isa(stmt, SlotNumber)
         return ssa
     elseif isa(stmt, TypedSlot)
@@ -94,12 +95,12 @@ function fixup_slot!(ir, idx, stmt::Union{SlotNumber, TypedSlot}, ssa)
     end
 end
 
-function fixup_use!(ir, idx, stmt, slot, ssa)
+function fixup_use!(ir, ci, idx, stmt, slot, ssa)
     if (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && slot_id(stmt) == slot
-        return fixup_slot!(ir, idx, stmt, ssa)
+        return fixup_slot!(ir, ci, idx, slot, stmt, ssa)
     end
     if isexpr(stmt, :(=))
-        stmt.args[2] = fixup_use!(ir, idx, stmt.args[2], slot, ssa)
+        stmt.args[2] = fixup_use!(ir, ci, idx, stmt.args[2], slot, ssa)
         return stmt
     end
     urs = userefs(stmt)
@@ -107,7 +108,7 @@ function fixup_use!(ir, idx, stmt, slot, ssa)
     for op in urs
         val = op[]
         if isa(val, Union{SlotNumber, TypedSlot}) && slot_id(val) == slot
-            op[] = fixup_slot!(ir, idx, val, ssa)
+            op[] = fixup_slot!(ir, ci, idx, slot, val, ssa)
         end
     end
     urs[]
@@ -115,14 +116,14 @@ end
 
 function fixup_uses!(ir, ci, uses, slot, ssa)
     for use in uses
-        ci.code[use] = fixup_use!(ir, use, ci.code[use], slot, ssa)
+        ci.code[use] = fixup_use!(ir, ci, use, ci.code[use], slot, ssa)
     end
 end
 
-function rename_uses!(ir, idx, stmt, renames)
-    isa(stmt, Union{SlotNumber, TypedSlot}) && return fixup_slot!(ir, idx, stmt, renames[slot_id(stmt)])
+function rename_uses!(ir, ci, idx, stmt, renames)
+    isa(stmt, Union{SlotNumber, TypedSlot}) && return fixup_slot!(ir, ci, idx, slot_id(stmt), stmt, renames[slot_id(stmt)])
     if isexpr(stmt, :(=))
-        stmt.args[2] = rename_uses!(ir, idx, stmt.args[2], renames)
+        stmt.args[2] = rename_uses!(ir, ci, idx, stmt.args[2], renames)
         return stmt
     end
     urs = userefs(stmt)
@@ -130,7 +131,7 @@ function rename_uses!(ir, idx, stmt, renames)
     for op in urs
         val = op[]
         if isa(val, Union{SlotNumber, TypedSlot})
-            op[] = fixup_slot!(ir, idx, val, renames[slot_id(val)])
+            op[] = fixup_slot!(ir, ci, idx, slot_id(val), val, renames[slot_id(val)])
         end
     end
     urs[]
@@ -184,7 +185,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
                 typ = ci.slottypes[idx]
                 ssaval = Argument(idx)
             elseif isa(ci.code[slot.defs[]], NewvarNode)
-                typ = Undef
+                typ = NI.MaybeUndef(Union{})
                 ssaval = undef_token
             else
                 val = ci.code[slot.defs[]].args[2]
@@ -228,12 +229,13 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             if isa(incoming_val, NewSSAValue)
                 push!(type_refine_phi, ssaval)
             end
-            typ = incoming_val == undef_token ? Undef : typ_for_val(incoming_val, ir, ci)
+            typ = incoming_val == undef_token ? NI.MaybeUndef(Union{}) : typ_for_val(incoming_val, ir, ci)
             new_node_id = ssaval - length(ir.stmts)
             old_insert, old_typ, _ = ir.new_nodes[new_node_id]
             if isa(typ, DelayedTyp)
                 push!(type_refine_phi, ssaval)
             end
+            @show (old_typ, typ)
             ir.new_nodes[new_node_id] = (old_insert,
                 isa(typ, DelayedTyp) ? Union{} : NI.tmerge(old_typ, typ), node)
             incoming_vals[slot] = NewSSAValue(ssaval)
@@ -246,7 +248,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
                 incoming_vals[slot_id(stmt.slot)] = undef_token
                 ci.code[idx] = nothing
             else
-                ci.code[idx] = rename_uses!(ir, idx, stmt, incoming_vals)
+                ci.code[idx] = rename_uses!(ir, ci, idx, stmt, incoming_vals)
                 # Record a store
                 if isexpr(stmt, :(=)) && isa(stmt.args[1], SlotNumber)
                     id = slot_id(stmt.args[1])

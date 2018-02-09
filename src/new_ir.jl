@@ -231,21 +231,6 @@ function predicate_insertion_pass!(ir::IRCode, domtree)
     ir
 end
 
-function get_val_if_type_cmp(def)
-    is_call(def, :(===)) || return nothing
-    (val, cmp) = def.args[2:3]
-    if !isa(val, SSAValue)
-        (cmp, val) = (val, cmp)
-    end
-    isa(val, SSAValue) || return nothing
-    isa(cmp, SSAValue) && return nothing
-    if isa(cmp, GlobalRef)
-        cmp = getfield(cmp.mod, cmp.name)
-    end
-    isdefined(typeof(cmp), :instance) || return nothing
-    return (val, cmp)
-end
-
 function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     ci.code = map(normalize, ci.code)
     ci.code = strip_trailing_junk(ci.code)
@@ -253,6 +238,7 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
     ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
+    @show ("pre_compact", ir)
     ir = compact!(ir)
     @show ("pre_verify", ir)
     verify_ir(ir)
@@ -261,6 +247,7 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     ir = getfield_elim_pass!(ir)
     ir = compact!(ir)
     ir = type_lift_pass!(ir)
+    @show ("post_lift", ir)
     ir = compact!(ir)
     ir
 end

@@ -80,3 +80,25 @@ function bar()
     x
 end
 @NI.code_typed bar()
+
+
+function baz()
+    if rand(Bool)
+        x = 1
+    else
+    end
+    x
+end
+@NI.code_typed baz()
+baz()
+
+
+function foo()
+    if rand(Bool)
+        x = 1
+    else
+    end
+    @isdefined x
+end
+@NI.code_typed foo()
+foo()
