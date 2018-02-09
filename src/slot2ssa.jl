@@ -95,20 +95,32 @@ function fixup_slot!(ir, ci, idx, slot, stmt::Union{SlotNumber, TypedSlot}, ssa)
     end
 end
 
-function fixup_use!(ir, ci, idx, stmt, slot, ssa)
-    if (isa(stmt, SlotNumber) || isa(stmt, TypedSlot)) && slot_id(stmt) == slot
-        return fixup_slot!(ir, ci, idx, slot, stmt, ssa)
+function fixemup!(cond, rename, ir, ci, idx, stmt)
+    if isa(stmt, Union{SlotNumber, TypedSlot}) && cond(stmt)
+        return fixup_slot!(ir, ci, idx, slot_id(stmt), stmt, rename(stmt))
     end
     if isexpr(stmt, :(=))
-        stmt.args[2] = fixup_use!(ir, ci, idx, stmt.args[2], slot, ssa)
+        stmt.args[2] = fixemup!(cond, rename, ir, ci, idx, stmt.args[2])
+        return stmt
+    end
+    if isa(stmt, PhiNode)
+        for i = 1:length(stmt.edges)
+            isassigned(stmt.values, i) || continue
+            val = stmt.values[i]
+            isa(val, Union{SlotNumber, TypedSlot}) || continue
+            cond(val) || continue
+            bb_idx = block_for_inst(ir.cfg, stmt.edges[i])
+            from_bb_terminator = last(ir.cfg.blocks[bb_idx].stmts)
+            stmt.values[i] = fixup_slot!(ir, ci, from_bb_terminator, slot_id(val), val, rename(val))
+        end
         return stmt
     end
     urs = userefs(stmt)
     urs === () && return stmt
     for op in urs
         val = op[]
-        if isa(val, Union{SlotNumber, TypedSlot}) && slot_id(val) == slot
-            op[] = fixup_slot!(ir, ci, idx, slot, val, ssa)
+        if isa(val, Union{SlotNumber, TypedSlot}) && cond(val)
+            op[] = fixup_slot!(ir, ci, idx, slot_id(val), val, rename(val))
         end
     end
     urs[]
@@ -116,25 +128,12 @@ end
 
 function fixup_uses!(ir, ci, uses, slot, ssa)
     for use in uses
-        ci.code[use] = fixup_use!(ir, ci, use, ci.code[use], slot, ssa)
+        ci.code[use] = fixemup!(stmt->slot_id(stmt)==slot,stmt->ssa,ir,ci,use,ci.code[use])
     end
 end
 
 function rename_uses!(ir, ci, idx, stmt, renames)
-    isa(stmt, Union{SlotNumber, TypedSlot}) && return fixup_slot!(ir, ci, idx, slot_id(stmt), stmt, renames[slot_id(stmt)])
-    if isexpr(stmt, :(=))
-        stmt.args[2] = rename_uses!(ir, ci, idx, stmt.args[2], renames)
-        return stmt
-    end
-    urs = userefs(stmt)
-    urs === () && return stmt
-    for op in urs
-        val = op[]
-        if isa(val, Union{SlotNumber, TypedSlot})
-            op[] = fixup_slot!(ir, ci, idx, slot_id(val), val, renames[slot_id(val)])
-        end
-    end
-    urs[]
+    fixemup!(stmt->true,stmt->renames[slot_id(stmt)],ir,ci,idx,stmt)
 end
 
 function strip_trailing_junk(code)
