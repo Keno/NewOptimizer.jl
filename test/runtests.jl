@@ -67,3 +67,16 @@ end
 let ir = NewOptimizer.run_passes(foo, Tuple{Any})
     @test !any(expr->NewOptimizer.is_call(expr, :getfield), ir.stmts)
 end
+
+using NewOptimizer
+using NotInferenceDontLookHere
+
+function bar()
+    if rand(Bool)
+        x = nothing
+    else
+        x = missing
+    end
+    x
+end
+@NI.code_typed bar()
