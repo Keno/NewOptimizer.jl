@@ -102,3 +102,18 @@ function foo()
 end
 @NI.code_typed foo()
 foo()
+
+function funion(x,y)
+    if y
+       z = x[1] in (:isequal, :isapprox, :≈)
+    else
+       z = false
+    end
+    if z
+       return 1
+    else
+       return 2
+    end
+end
+@NI.code_typed funion(Any[:isequal], true)
+funion(Any[:isequal], true)
