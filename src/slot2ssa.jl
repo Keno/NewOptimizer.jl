@@ -2,6 +2,7 @@ function scan_entry!(result, idx, stmt)
     # NewVarNodes count as defs for the purpose
     # of liveness analysis (i.e. they kill use chains)
     if isa(stmt, NewvarNode)
+        result[slot_id(stmt.slot)].any_newvar[] = true
         push!(result[slot_id(stmt.slot)].defs, idx)
         return
     elseif isexpr(stmt, :(=))
@@ -19,6 +20,23 @@ function scan_entry!(result, idx, stmt)
         if isa(val, Union{SlotNumber, TypedSlot})
             push!(result[slot_id(val)].uses, idx)
         end
+    end
+end
+
+struct SlotInfo
+    defs::Vector{Int}
+    uses::Vector{Int}
+    any_newvar::Ref{Bool}
+end
+SlotInfo() = SlotInfo(Int[], Int[], Ref{Bool}(false))
+
+function lift_defuse(cfg, defuse)
+    map(defuse) do slot
+        SlotInfo(
+            map(x->block_for_inst(cfg, x), slot.defs),
+            map(x->block_for_inst(cfg, x), slot.uses),
+            Ref{Bool}(slot.any_newvar[])
+        )
     end
 end
 
@@ -85,6 +103,10 @@ end
 function fixup_slot!(ir, ci, idx, slot, stmt::Union{SlotNumber, TypedSlot}, ssa)
     # We don't really have the information here to get rid of these.
     # We'll do so later
+    if ssa === undef_token
+        insert_node!(ir, idx, Any, Expr(:throw_undef_if_not, ci.slotnames[slot], false))
+        return undef_token
+    end
     if !isa(ssa, Argument) && !(ssa === nothing) && ((ci.slotflags[slot] & NI.SLOT_USEDUNDEF) != 0)
         insert_node!(ir, idx, Any, Expr(:undefcheck, ci.slotnames[slot], ssa))
     end
@@ -120,7 +142,13 @@ function fixemup!(cond, rename, ir, ci, idx, stmt)
     for op in urs
         val = op[]
         if isa(val, Union{SlotNumber, TypedSlot}) && cond(val)
-            op[] = fixup_slot!(ir, ci, idx, slot_id(val), val, rename(val))
+            x = fixup_slot!(ir, ci, idx, slot_id(val), val, rename(val))
+            # We inserted an undef error node. Delete subsequent statement
+            # to avoid confusing the optimizer
+            if x === undef_token
+                return nothing
+            end
+            op[] = x
         end
     end
     urs[]
@@ -179,7 +207,7 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
     for (idx, slot) in enumerate(defuse)
         # No uses => no need for phi nodes
         isempty(slot.uses) && continue
-        if length(slot.defs) == 1
+        if length(slot.defs) == 1 && slot.any_newvar[]
             if slot.defs[] == 0
                 typ = ci.slottypes[idx]
                 ssaval = Argument(idx)
@@ -210,7 +238,16 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
         push!(left, idx)
     end
     # Perform SSA renaming
-    worklist = Any[(1, 0, Any[((0 in defuse[x].defs) ? Argument(x) : SSAValue(-1)) for x = 1:length(ci.slotnames)])]
+    initial_incoming_vals = map(1:length(ci.slotnames)) do x
+        if 0 in defuse[x].defs
+            return Argument(x)
+        elseif !defuse[x].any_newvar[]
+            return undef_token
+        else
+            return SSAValue(-1)
+        end
+    end
+    worklist = Any[(1, 0, initial_incoming_vals)]
     visited = Set{Int}()
     type_refine_phi = Set{Int}()
     while !isempty(worklist)

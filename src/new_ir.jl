@@ -107,21 +107,6 @@ function compute_basic_blocks(stmts::Vector{Any})
     CFG(blocks, basic_block_index)
 end
 
-struct SlotInfo
-    defs::Vector{Int}
-    uses::Vector{Int}
-end
-SlotInfo() = SlotInfo(Int[], Int[])
-
-function lift_defuse(cfg, defuse)
-    map(defuse) do slot
-        SlotInfo(
-            map(x->block_for_inst(cfg, x), slot.defs),
-            map(x->block_for_inst(cfg, x), slot.uses)
-        )
-    end
-end
-
 
 # Run iterated dominance frontier
 function idf(cfg, defuse, domtree, slot)
@@ -247,7 +232,7 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     ir = compact!(ir)
     ir = getfield_elim_pass!(ir)
     ir = compact!(ir)
-    @show ("pre_lift", ir)
+    #@show ("pre_lift", ir)
     ir = type_lift_pass!(ir)
     ir = compact!(ir)
     ir
