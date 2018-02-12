@@ -29,6 +29,7 @@ function verify_ir(ir::IRCode)
                 phiT = ir.types[idx]
                 if isa(val, SSAValue)
                     if !(NI.:⊑)(ir.types[val.id], phiT)
+                        @show ir
                         @error """
                             PhiNode $idx, has operand $(val.id), whose type is not a sub lattice element.
                             PhiNode type was $phiT

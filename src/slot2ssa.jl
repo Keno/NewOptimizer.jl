@@ -345,7 +345,12 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             old_insert, old_typ, node = ir.new_nodes[new_idx]
             new_typ = Union{}
             for i = 1:length(node.values)
-                isassigned(node.values, i) || continue
+                if !isassigned(node.values, i)
+                    if !isa(new_typ, NI.MaybeUndef)
+                        new_typ = NI.MaybeUndef(new_typ)
+                    end
+                    continue
+                end
                 typ = typ_for_val(node.values[i], ir, ci)
                 if isa(typ, DelayedTyp)
                     typ = ir.new_nodes[typ.phi.id - length(ir.stmts)][2]

@@ -26,7 +26,7 @@ function getfield_elim_pass!(ir::IRCode)
                     isassigned(def.values, n) || return false
                     value = def.values[n]
                     edge_typ = value_typ(compact, value)
-                    return edge_typ <: typeconstraint
+                    return (NI.:⊑)(edge_typ, typeconstraint)
                 end)
                 # For now, only look at unique predecessors
                 if length(possible_predecessors) == 1
@@ -110,8 +110,8 @@ function type_lift_pass!(ir::IRCode)
             val = isexpr(stmt, :isdefined) ? stmt.args[1] : stmt.args[2]
             # undef can only show up by being introduced in a phi
             # node, so lift all phi nodes that have maybe undef values
-            processed = Dict{Int, Tuple{SSAValue, PhiNode}}()
-            worklist = Tuple{Int, Int, Int}[(val.id, 0, 0)]
+            processed = Dict{Int, SSAValue}()
+            worklist = Tuple{Int, SSAValue, Int}[(val.id, SSAValue(0), 0)]
             stmt_id = val.id
             while isa(ir.stmts[stmt_id], PiNode)
                 stmt_id = ir.stmts[stmt_id].val.id
@@ -124,6 +124,7 @@ function type_lift_pass!(ir::IRCode)
                     edges = copy(def.edges)
                     values = Vector{Any}(uninitialized, length(edges))
                     new_phi = insert_node!(ir, item, Bool, PhiNode(edges, values))
+                    processed[item] = new_phi
                     if first
                         lifted_undef[stmt_id] = new_phi
                         first = false
@@ -139,11 +140,11 @@ function type_lift_pass!(ir::IRCode)
                                 val = true
                             else
                                 while isa(ir.stmts[id], PiNode)
-                                    ir = ir.stmts[id].val.id
+                                    id = ir.stmts[id].val.id
                                 end
                                 if isa(ir.stmts[id], PhiNode)
                                     if haskey(processed, id)
-                                        val = processed[id][2]
+                                        val = processed[id]
                                     else
                                         push!(worklist, (id, new_phi, i))
                                         continue
@@ -155,7 +156,7 @@ function type_lift_pass!(ir::IRCode)
                         end
                         values[i] = val
                     end
-                    if which !== 0
+                    if which !== SSAValue(0)
                         ir[which].values[use] = new_phi
                     end
                 end
@@ -174,7 +175,7 @@ function type_lift_pass!(ir::IRCode)
             if isa(def, PhiNode)
                 # See if this is only true on one branch
                 branches = collect(Iterators.filter(zip(def.edges, def.values)) do (edge, value)
-                    cmptyp <: value_typ(ir, value)
+                    (NI.:⊑)(cmptyp, value_typ(ir, value))
                 end)
                 length(branches) == 1 || continue
                 value_typ(ir, branches[1][2]) == cmptyp || continue

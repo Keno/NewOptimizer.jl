@@ -44,6 +44,14 @@ struct IRCode
 end
 IRCode(stmts, cfg, mod) = IRCode(stmts, Any[], cfg, Tuple{Int, Type, Any}[], mod)
 
+function Base.getindex(x::IRCode, s::SSAValue)
+    if s.id <= length(x.stmts)
+        return x.stmts[s.id]
+    else
+        return x.new_nodes[s.id - length(x.stmts)][3]
+    end
+end
+
 struct OldSSAValue
     id::Int
 end
