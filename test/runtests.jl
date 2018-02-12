@@ -117,3 +117,13 @@ function funion(x,y)
 end
 @NI.code_typed funion(Any[:isequal], true)
 funion(Any[:isequal], true)
+
+
+function tuple_phi()
+    x = (1, 1)
+    while x[1] <= 10
+        ccall(:jl_, Cvoid, (Any,), x[2])
+        x = (1, x[2]+1)
+    end
+    x
+end

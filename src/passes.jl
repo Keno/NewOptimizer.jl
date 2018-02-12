@@ -22,13 +22,17 @@ function getfield_elim_pass!(ir::IRCode)
                 end
                 continue
             elseif isa(def, PhiNode)
-                possible_predecessors = collect(Iterators.filter(zip(def.edges, def.values)) do (edge, value)
+                possible_predecessors = collect(Iterators.filter(1:length(def.edges)) do n
+                    isassigned(def.values, n) || return false
+                    value = def.values[n]
                     edge_typ = value_typ(compact, value)
                     return edge_typ <: typeconstraint
                 end)
                 # For now, only look at unique predecessors
                 if length(possible_predecessors) == 1
-                    pred, val = possible_predecessors[1]
+                    n = possible_predecessors[1]
+                    pred = def.edges[n]
+                    val = def.values[n]
                     if isa(val, SSAValue)
                         push!(phi_locs, (pred, defidx))
                         defidx = val.id
