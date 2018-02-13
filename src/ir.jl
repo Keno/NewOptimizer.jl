@@ -38,11 +38,12 @@ end
 struct IRCode
     stmts::Vector{Any}
     types::Vector{Any}
+    argtypes::Vector{Any}
     cfg::CFG
     new_nodes::Vector{Tuple{Int, Any, Any}}
     mod::Module
 end
-IRCode(stmts, cfg, mod) = IRCode(stmts, Any[], cfg, Tuple{Int, Type, Any}[], mod)
+IRCode(stmts, cfg, argtypes, mod) = IRCode(stmts, Any[], argtypes, cfg, Tuple{Int, Type, Any}[], mod)
 
 function Base.getindex(x::IRCode, s::SSAValue)
     if s.id <= length(x.stmts)
@@ -375,12 +376,14 @@ end
 function value_typ(ir::IRCode, value)
     isa(value, SSAValue) && return ir.types[value.id]
     isa(value, GlobalRef) && return typeof(getfield(value.mod, value.name))
+    isa(value, Argument) && return ir.argtypes[value.n]
     return typeof(value)
 end
 
 function value_typ(ir::IncrementalCompact, value)
     isa(value, SSAValue) && return types(ir)[value.id]
     isa(value, GlobalRef) && return typeof(getfield(value.mod, value.name))
+    isa(value, Argument) && return ir.ir.argtypes[value.n]
     return typeof(value)
 end
 
@@ -536,7 +539,7 @@ function finish(compact::IncrementalCompact)
         maybe_erase_unused!(extra_worklist, compact, pop!(extra_worklist))
     end
     cfg = CFG(compact.ir.cfg.blocks, Int[first(bb.stmts) for bb in compact.ir.cfg.blocks[2:end]])
-    IRCode(compact.result, compact.result_types, cfg, Any[], compact.ir.mod)
+    IRCode(compact.result, compact.result_types, compact.ir.argtypes, cfg, Any[], compact.ir.mod)
 end
 
 function compact!(code::IRCode)

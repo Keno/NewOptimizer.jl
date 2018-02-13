@@ -127,3 +127,12 @@ function tuple_phi()
     end
     x
 end
+
+function arg_tuple(x::Bool, y::Tuple{Int, Int})
+    if x
+        y = (1, 1)
+    end
+    y[2]
+end
+@test arg_tuple(true, (2, 2)) == 1
+@test arg_tuple(false, (2, 2)) == 2

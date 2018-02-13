@@ -196,14 +196,14 @@ function typ_for_val(val, ir, ci)
     return typeof(val)
 end
 
-function construct_ssa!(ci, mod, cfg, domtree, defuse)
+function construct_ssa!(ci, mod, cfg, domtree, defuse, nargs)
     left = Int[]
     defuse_blocks = lift_defuse(cfg, defuse)
     phi_slots = [Vector{Int}() for _ = 1:length(cfg.blocks)]
     phi_nodes = [Vector{Pair{Int,PhiNode}}() for _ = 1:length(cfg.blocks)]
     phi_ssas = SSAValue[]
     code = Any[nothing for _ = 1:length(ci.code)]
-    ir = IRCode(code, cfg, mod)
+    ir = IRCode(code, cfg, ci.slottypes[1:(nargs+1)], mod)
     for (idx, slot) in enumerate(defuse)
         # No uses => no need for phi nodes
         isempty(slot.uses) && continue
@@ -267,6 +267,8 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
             else
                 push!(node.values, incoming_val)
             end
+            # TODO: Remove the next line, it shouldn't be necessary
+            push!(type_refine_phi, ssaval)
             if isa(incoming_val, NewSSAValue)
                 push!(type_refine_phi, ssaval)
             end
@@ -357,7 +359,8 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
                 end
                 new_typ = NI.tmerge(new_typ, typ)
             end
-            if old_typ != new_typ
+            if !(NI.:⊑)(old_typ, new_typ) || !(NI.:⊑)(new_typ, old_typ)
+                #ccall(:jl_, Cvoid, (Any,), (phi, old_typ, new_typ))
                 ir.new_nodes[new_idx] = (old_insert, new_typ, node)
                 changed = true
             end
@@ -373,5 +376,5 @@ function construct_ssa!(ci, mod, cfg, domtree, defuse)
     # Renumber SSA values
     code = map(stmt->new_to_regular(renumber_ssa!(stmt, ssavalmap)), code)
     new_nodes = map(((pt,typ,stmt),)->(pt, typ, new_to_regular(renumber_ssa!(stmt, ssavalmap))), new_nodes)
-    IRCode(code, types, cfg, new_nodes, mod)
+    IRCode(code, types, ci.slottypes[1:(nargs+1)], cfg, new_nodes, mod)
 end

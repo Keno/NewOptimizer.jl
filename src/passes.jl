@@ -116,8 +116,16 @@ function type_lift_pass!(ir::IRCode)
             while isa(ir.stmts[stmt_id], PiNode)
                 stmt_id = ir.stmts[stmt_id].val.id
             end
+            def = ir.stmts[stmt_id]
+            if !isa(def, PhiNode)
+                if isexpr(stmt, :isdefiend)
+                    ir.stmts[idx] = true
+                else
+                    ir.stmts[idx] = nothing
+                end
+                continue
+            end
             if !haskey(lifted_undef, stmt_id)
-                def = ir.stmts[stmt_id]
                 first = true
                 while !isempty(worklist)
                     item, which, use = pop!(worklist)
@@ -174,16 +182,18 @@ function type_lift_pass!(ir::IRCode)
             def = ir.stmts[val.id]
             if isa(def, PhiNode)
                 # See if this is only true on one branch
-                branches = collect(Iterators.filter(zip(def.edges, def.values)) do (edge, value)
+                branches = collect(Iterators.filter(1:length(def.edges)) do n
+                    isassigned(def.values, n) || return false
+                    value = def.values[n]
                     (NI.:⊑)(cmptyp, value_typ(ir, value))
                 end)
                 length(branches) == 1 || continue
-                value_typ(ir, branches[1][2]) == cmptyp || continue
+                value_typ(ir, def.values[branches[1]]) == cmptyp || continue
                 # Ok, merge the compare into the phi node
                 node = PhiNode()
                 for edge in def.edges
                     push!(node.edges, edge)
-                    push!(node.values, edge == branches[1][1])
+                    push!(node.values, edge == def.edges[branches[1]])
                 end
                 ir.stmts[idx] = insert_node!(ir, val.id, Bool, node)
             end

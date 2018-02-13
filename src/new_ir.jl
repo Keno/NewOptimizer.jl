@@ -222,17 +222,18 @@ function run_passes(ci::CodeInfo, mod::Module, nargs::Int)
     cfg = compute_basic_blocks(ci.code)
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
-    #@show ci.code
-    ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
+    # @show ci.code
+    ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts, nargs)
     #@show ("pre_compact", ir)
     ir = compact!(ir)
-    #@show ("pre_verify", ir)
+    # @show ("pre_verify", ir)
     verify_ir(ir)
     ir = predicate_insertion_pass!(ir, domtree)
     ir = compact!(ir)
+    #@show ("pre_getfield_elim", ir)
     ir = getfield_elim_pass!(ir)
     ir = compact!(ir)
-    #@show ("pre_lift", ir)
+    # @show ("pre_lift", ir)
     ir = type_lift_pass!(ir)
     ir = compact!(ir)
     ir
@@ -245,7 +246,7 @@ function construct_ssa(f, args, mod::Module=Core.Main)
     cfg = compute_basic_blocks(ci.code)
     defuse_insts = scan_slot_def_use(nargs, ci)
     domtree = construct_domtree(cfg)
-    ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts)
+    ir = construct_ssa!(ci, mod, cfg, domtree, defuse_insts, nargs)
     ir
 end
 
