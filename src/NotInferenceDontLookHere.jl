@@ -4,8 +4,7 @@ baremodule NotInferenceDontLookHere
 function code_llvm end
 
 using Core.Intrinsics
-using Core.Intrinsics
-using NewOptimizer
+using Core.IR
 using InteractiveUtils
 
 import Core: print, println, show, write, unsafe_write, STDOUT, STDERR,
@@ -111,3 +110,35 @@ for fname in [:code_typed, :code_lowered]
 end
 
 end # module
+
+struct DomTreeNode
+    level::Int
+    children::Vector{Int}
+end
+DomTreeNode() = DomTreeNode(1, Vector{Int}())
+
+struct DomTree
+    idoms::Vector{Int}
+    nodes::Vector{DomTreeNode}
+end
+
+module IRShow
+	using NotInferenceDontLookHere
+    using Base.Meta
+    using Core.IR
+ 	using .NI: IRCode, ReturnNode, GotoIfNot, CFG, scan_ssa_use!, DomTree, DomTreeNode
+    using AbstractTrees
+	NI.push!(a::Set, b) = Base.push!(a, b)
+	include(Base.joinpath(Base.Sys.BINDIR, Base.DATAROOTDIR, "julia", "base", "compiler/ssair/show.jl"))
+    
+    struct DomTreeNodeRef
+        tree::DomTree
+        idx::Int
+    end
+    
+    AbstractTrees.children(tree::DomTree) = (DomTreeNodeRef(tree, 1),)
+    AbstractTrees.children(node::DomTreeNodeRef) = map(x->DomTreeNodeRef(node.tree, x), node.tree.nodes[node.idx].children)
+    AbstractTrees.printnode(io::IO, node::DomTree) = print(io, "Entry")
+    AbstractTrees.printnode(io::IO, node::DomTreeNodeRef) = print(io, node.idx)
+    Base.show(io::IO, tree::DomTree) = print_tree(io, tree)
+end
